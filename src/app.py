@@ -3,17 +3,19 @@ import os
 import re
 import sqlite3
 import ccxt
+import pandas as pd
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import pytz
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = None # Сохраняем ваш ID для вечерних сообщений
+CHAT_ID = None 
 
-# Инициализация биржи (только чтение цены, без ключей)
 exchange = ccxt.binance()
 MINSK_TZ = pytz.timezone('Europe/Minsk')
 
@@ -22,71 +24,80 @@ def init_db():
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS predictions (
+        CREATE TABLE IF NOT EXISTS bot_predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
             date TEXT,
-            min_price REAL,
-            max_price REAL,
-            close_price REAL,
-            prediction TEXT,
-            is_correct INTEGER
+            direction TEXT,
+            entry_price REAL,
+            status TEXT DEFAULT 'pending' 
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT,
+            user_prediction TEXT,
+            bot_prediction TEXT,
+            result TEXT
         )
     ''')
     conn.commit()
     conn.close()
 
-def save_range(user_id, min_p, max_p):
+def save_bot_prediction(date, direction, price):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
-    cursor.execute('''
-        INSERT INTO predictions (user_id, date, min_price, max_price)
-        VALUES (?, ?, ?, ?)
-    ''', (user_id, today, min_p, max_p))
+    cursor.execute('INSERT INTO bot_predictions (date, direction, entry_price) VALUES (?, ?, ?)', (date, direction, price))
     conn.commit()
     conn.close()
 
-def get_today_range(user_id):
+def get_pending_bot_prediction():
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
-    cursor.execute('SELECT id, min_price, max_price FROM predictions WHERE user_id = ? AND date = ? ORDER BY id DESC LIMIT 1', (user_id, today))
+    cursor.execute('SELECT id, direction, entry_price FROM bot_predictions WHERE date = ? AND status = "pending" ORDER BY id DESC LIMIT 1', (today,))
     row = cursor.fetchone()
     conn.close()
     return row
 
-def get_pending_predictions():
+def resolve_prediction(pred_id, result):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
-    cursor.execute('SELECT id, user_id, min_price, max_price FROM predictions WHERE date = ? AND close_price IS NULL', (today,))
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
-
-def update_close(pred_id, user_id, close_price, prediction, is_correct):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        UPDATE predictions 
-        SET close_price = ?, prediction = ?, is_correct = ?
-        WHERE id = ? AND user_id = ?
-    ''', (close_price, prediction, is_correct, pred_id, user_id))
+    cursor.execute('UPDATE bot_predictions SET status = ? WHERE id = ?', (result, pred_id))
     conn.commit()
     conn.close()
 
-def get_stats(user_id):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*), SUM(is_correct) FROM predictions WHERE user_id = ? AND is_correct IS NOT NULL', (user_id,))
-    total, correct = cursor.fetchone()
-    conn.close()
-    return total or 0, correct or 0
-
 init_db()
-# -------------------
 
+# --- ИНДИКАТОРЫ ---
+def get_rsi_prediction():
+    try:
+        # Берем 100 последних часовых свечей
+        ohlcv = exchange.fetch_ohlcv('BTC/USDT', timeframe='1h', limit=100)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        
+        # Считаем RSI (14 периодов)
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        current_rsi = df['RSI'].iloc[-1]
+        current_price = df['close'].iloc[-1]
+        
+        if current_rsi < 30:
+            return "LONG", current_price, f"RSI = {current_rsi:.2f} (перепродан, ждем рост)"
+        elif current_rsi > 70:
+            return "SHORT", current_price, f"RSI = {current_rsi:.2f} (перекуплен, ждем падение)"
+        else:
+            # Если RSI в нейтральной зоне, бот не торгует, но мы можем дать легкий прогноз по тренду
+            return "WAIT", current_price, f"RSI = {current_rsi:.2f} (нет четкого сигнала)"
+    except Exception as e:
+        print(f"Ошибка RSI: {e}")
+        return "ERROR", 0, "Ошибка данных"
+
+# --- БОТ ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -95,93 +106,105 @@ async def cmd_start(message: types.Message):
     global CHAT_ID
     CHAT_ID = message.chat.id
     await message.answer(
-        "🤖 Привет! Я твой ИИ-помощник по BTC.\n\n"
-        "Пришли мне два числа (например: 64000 66000).\n"
-        "В 23:59 я САМ проверю цену закрытия на бирже и запишу результат.\n"
-        "Команда /price покажет текущую цену.\n"
-        "Команда /stats покажет статистику."
+        "🤖 Привет! Я твой продвинутый ИИ-помощник.\n\n"
+        "Теперь я сам анализирую рынок в 10:30 и даю прогноз на основе RSI!\n"
+        "А в 23:59 я проверяю результат.\n\n"
+        "Также ты можешь спросить: «Какая сейчас цена?» или «Статистика»."
     )
-
-@dp.message(Command("stats"))
-async def cmd_stats(message: types.Message):
-    total, correct = get_stats(message.from_user.id)
-    if total == 0:
-        await message.answer("📊 Пока нет завершенных прогнозов.")
-    else:
-        percent = (correct / total) * 100
-        await message.answer(f"📊 Статистика:\nВсего: {total}\nУгадал: {correct}\nТочность: {percent:.1f}%")
-
-@dp.message(Command("price"))
-async def cmd_price(message: types.Message):
-    try:
-        ticker = exchange.fetch_ticker('BTC/USDT')
-        current_price = float(ticker['last'])
-        await message.answer(f"💰 Текущая цена BTC: {current_price} USDT")
-    except Exception as e:
-        await message.answer(f"Не удалось узнать цену. Ошибка: {e}")
 
 @dp.message()
 async def handle_text(message: types.Message):
-    text = message.text.lower()
-    user_id = message.from_user.id
-    numbers = re.findall(r'\d+', text)
+    text = message.text.lower().strip()
     
-    if not numbers:
-        await message.answer("Я не вижу цифр. Пришли мне два числа (например: 64000 66000).")
-        return
-
-    if len(numbers) >= 2 and "закрытие" not in text:
-        min_p = float(numbers[0])
-        max_p = float(numbers[1])
-        save_range(user_id, min_p, max_p)
-        
-        mid = (min_p + max_p) / 2
-        await message.answer(
-            f"✅ Записал диапазон: {min_p} - {max_p}.\n"
-            f"Середина: {mid}.\n"
-            f"⏰ В 23:59 я сам проверю цену закрытия и дам прогноз."
-        )
-        return
-
-    await message.answer("Я вижу цифры, но не понял. Пришли 2 числа (например: 64000 66000).")
-
-# --- АВТОМАТИЧЕСКАЯ ПРОВЕРКА В 23:59 ---
-async def check_results():
-    print("Запуск проверки результатов...")
-    pending = get_pending_predictions()
-    if not pending:
-        print("Нет прогнозов для проверки.")
-        return
-
-    try:
+    if "цена" in text or "курс" in text:
         ticker = exchange.fetch_ticker('BTC/USDT')
-        close_price = float(ticker['last'])
-        print(f"Цена закрытия: {close_price}")
-    except Exception as e:
-        print(f"Ошибка получения цены: {e}")
+        price = f"{ticker['last']:,.2f}".replace(',', ' ')
+        await message.answer(f"💰 Сейчас BTC стоит: {price} USDT")
         return
 
-    for pred_id, user_id, min_p, max_p in pending:
-        mid = (min_p + max_p) / 2
-        if close_price < mid:
-            prediction = "SHORT"
-            is_correct = 1 if close_price < mid else 0
-        else:
-            prediction = "LONG"
-            is_correct = 1 if close_price > mid else 0
-        
-        update_close(pred_id, user_id, close_price, prediction, is_correct)
-        
+    # Если пользователь нажал кнопку "Угадал/Не угадал"
+    if "✅" in text or "❌" in text:
+        # Логика обработки нажатия кнопки будет здесь
+        await message.answer("Я записал твой результат в статистику!")
+        return
+
+    await message.answer("Я тебя не понял. Напиши «Какая сейчас цена» или дождись моего утреннего прогноза в 10:30.")
+
+# --- УТРЕННИЙ ПРОГНОЗ В 10:30 ---
+async def morning_prediction():
+    print("Делаю утренний прогноз...")
+    direction, price, reason = get_rsi_prediction()
+    
+    if direction == "ERROR" or direction == "WAIT":
         if CHAT_ID:
-            result_text = f"🔔 Итоги дня:\nЦена закрытия: {close_price}\nМой прогноз был: {prediction}\nРезультат: {'✅ Угадал!' if is_correct else '❌ Не угадал.'}"
-            await bot.send_message(chat_id=CHAT_ID, text=result_text)
+            await bot.send_message(chat_id=CHAT_ID, text=f"⏳ Утренний анализ: {reason}. Сигнала на вход нет.")
+        return
+
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
+    save_bot_prediction(today, direction, price)
+    formatted_price = f"{price:,.2f}".replace(',', ' ')
+    
+    # Создаем кнопки для пользователя
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Согласен с ботом", callback_data=f"agree_{direction}")
+    builder.button(text="❌ Мой прогноз другой", callback_data=f"disagree_{direction}")
+
+    text = (
+        f"🌅 Доброе утро! Мой анализ на сегодня:\n\n"
+        f"📊 Прогноз: {direction}\n"
+        f"💰 Цена входа: {formatted_price} USDT\n"
+        f"💡 Причина: {reason}\n\n"
+        f"Ты согласен со мной?"
+    )
+    
+    if CHAT_ID:
+        await bot.send_message(chat_id=CHAT_ID, text=text, reply_markup=builder.as_markup())
+
+# --- ВЕЧЕРНЯЯ ПРОВЕРКА В 23:59 ---
+async def evening_check():
+    print("Проверяю вечерние результаты...")
+    pending = get_pending_bot_prediction()
+    if not pending:
+        return
+
+    pred_id, direction, entry_price = pending
+    ticker = exchange.fetch_ticker('BTC/USDT')
+    close_price = float(ticker['last'])
+    
+    # Логика "Чистого знака"
+    is_correct = False
+    if direction == "LONG" and close_price > entry_price:
+        is_correct = True
+    elif direction == "SHORT" and close_price < entry_price:
+        is_correct = True
+        
+    result_status = "correct" if is_correct else "wrong"
+    resolve_prediction(pred_id, result_status)
+    
+    formatted_close = f"{close_price:,.2f}".replace(',', ' ')
+    formatted_entry = f"{entry_price:,.2f}".replace(',', ' ')
+    
+    emoji = "✅ УГАДАЛ!" if is_correct else "❌ НЕ УГАДАЛ."
+    
+    text = (
+        f"🌙 Итоги дня:\n"
+        f"Мой прогноз был: {direction} (вход {formatted_entry})\n"
+        f"Цена закрытия: {formatted_close}\n\n"
+        f"Результат: {emoji}"
+    )
+    
+    if CHAT_ID:
+        await bot.send_message(chat_id=CHAT_ID, text=text)
 
 async def handle_web(request):
     return web.Response(text="Bot is running!")
 
 async def main():
     scheduler = AsyncIOScheduler(timezone=MINSK_TZ)
-    scheduler.add_job(check_results, 'cron', hour=23, minute=59)
+    # Утренний прогноз в 10:30
+    scheduler.add_job(morning_prediction, 'cron', hour=10, minute=30)
+    # Вечерняя проверка в 23:59
+    scheduler.add_job(evening_check, 'cron', hour=23, minute=59)
     scheduler.start()
 
     app = web.Application()
