@@ -3,3 +3,4 @@ requests
 aiohttp
 apscheduler
 ccxt
+pytz
