@@ -2,12 +2,20 @@ import asyncio
 import os
 import re
 import sqlite3
+import ccxt
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from datetime import datetime
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import pytz
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = None # Мы сохраним ваш ID, когда вы напишете боту
+
+# Инициализация биржи (без ключей, только чтение цены)
+exchange = ccxt.binance()
+MINSK_TZ = pytz.timezone('Europe/Minsk')
 
 # --- БАЗА ДАННЫХ ---
 def init_db():
@@ -31,7 +39,7 @@ def init_db():
 def save_range(user_id, min_p, max_p):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     cursor.execute('''
         INSERT INTO predictions (user_id, date, min_price, max_price)
         VALUES (?, ?, ?, ?)
@@ -42,21 +50,30 @@ def save_range(user_id, min_p, max_p):
 def get_today_range(user_id):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     cursor.execute('SELECT id, min_price, max_price FROM predictions WHERE user_id = ? AND date = ? ORDER BY id DESC LIMIT 1', (user_id, today))
     row = cursor.fetchone()
     conn.close()
     return row
 
-def update_close(user_id, close_price, prediction, is_correct):
+def get_pending_predictions():
+    # Берем прогнозы за сегодня, у которых еще нет цены закрытия
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
+    cursor.execute('SELECT id, user_id, min_price, max_price FROM predictions WHERE date = ? AND close_price IS NULL', (today,))
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def update_close(pred_id, user_id, close_price, prediction, is_correct):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
     cursor.execute('''
         UPDATE predictions 
         SET close_price = ?, prediction = ?, is_correct = ?
-        WHERE user_id = ? AND date = ? AND id = (SELECT MAX(id) FROM predictions WHERE user_id = ? AND date = ?)
-    ''', (close_price, prediction, is_correct, user_id, today, user_id, today))
+        WHERE id = ? AND user_id = ?
+    ''', (close_price, prediction, is_correct, pred_id, user_id))
     conn.commit()
     conn.close()
 
@@ -76,11 +93,13 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    global CHAT_ID
+    CHAT_ID = message.chat.id
     await message.answer(
         "🤖 Привет! Я твой ИИ-помощник по BTC.\n\n"
         "Пришли мне два числа (например: 64000 66000).\n"
-        "Вечером пришли цену закрытия (например: 65000).\n"
-        "Команда /stats покажет мою статистику."
+        "В 23:59 я САМ проверю цену закрытия на бирже и запишу результат.\n"
+        "Команда /stats покажет статистику."
     )
 
 @dp.message(Command("stats"))
@@ -99,11 +118,10 @@ async def handle_text(message: types.Message):
     numbers = re.findall(r'\d+', text)
     
     if not numbers:
-        await message.answer("Я не вижу цифр. Пришли мне два числа или цену закрытия.")
+        await message.answer("Я не вижу цифр. Пришли мне два числа (диапазон).")
         return
 
-    # Если прислали два числа (ночной диапазон)
-    if len(numbers) >= 2 and "закрытие" not in text and "цена" not in text:
+    if len(numbers) >= 2 and "закрытие" not in text:
         min_p = float(numbers[0])
         max_p = float(numbers[1])
         save_range(user_id, min_p, max_p)
@@ -112,41 +130,55 @@ async def handle_text(message: types.Message):
         await message.answer(
             f"✅ Записал диапазон: {min_p} - {max_p}.\n"
             f"Середина: {mid}.\n"
-            f"📊 Жду цену закрытия."
+            f"⏰ В 23:59 я сам проверю цену закрытия и дам прогноз."
         )
         return
 
-    # Если прислали цену закрытия
-    row = get_today_range(user_id)
-    if row:
-        close_price = float(numbers[0])
-        pred_id, min_p, max_p = row
+    await message.answer("Я вижу цифры, но не понял. Пришли 2 числа (например: 64000 66000).")
+
+# --- АВТОМАТИЧЕСКАЯ ПРОВЕРКА В 23:59 ---
+async def check_results():
+    print("Запуск проверки результатов...")
+    pending = get_pending_predictions()
+    if not pending:
+        print("Нет прогнозов для проверки.")
+        return
+
+    try:
+        # Получаем цену закрытия с биржи
+        ticker = exchange.fetch_ticker('BTC/USDT')
+        close_price = float(ticker['last'])
+        print(f"Цена закрытия: {close_price}")
+    except Exception as e:
+        print(f"Ошибка получения цены: {e}")
+        return
+
+    for pred_id, user_id, min_p, max_p in pending:
         mid = (min_p + max_p) / 2
-        
         if close_price < mid:
             prediction = "SHORT"
-            is_correct = 1 if close_price < (min_p + max_p)/2 else 0 
-            result = f"📉 Цена {close_price} ниже середины ({mid}). Прогноз: SHORT."
+            is_correct = 1 if close_price < mid else 0
         else:
             prediction = "LONG"
-            is_correct = 1 if close_price > (min_p + max_p)/2 else 0
-            result = f"📈 Цена {close_price} выше середины ({mid}). Прогноз: LONG."
+            is_correct = 1 if close_price > mid else 0
         
-        update_close(user_id, close_price, prediction, is_correct)
+        update_close(pred_id, user_id, close_price, prediction, is_correct)
         
-        await message.answer(
-            f"🔔 Закрытие {close_price} принято.\n"
-            f"{result}\n"
-            f"📝 Записал в базу. Проверь статистику командой /stats."
-        )
-        return
-
-    await message.answer("Я вижу цифры, но не понял логику. Пришли 2 числа (диапазон) или 1 число (закрытие).")
+        # Отправляем сообщение пользователю, если знаем его ID
+        if CHAT_ID:
+            result_text = f"🔔 Итоги дня:\nЦена закрытия: {close_price}\nМой прогноз был: {prediction}\nРезультат: {'✅ Угадал!' if is_correct else '❌ Не угадал.'}"
+            await bot.send_message(chat_id=CHAT_ID, text=result_text)
 
 async def handle_web(request):
     return web.Response(text="Bot is running!")
 
 async def main():
+    # Настройка таймера
+    scheduler = AsyncIOScheduler(timezone=MINSK_TZ)
+    # Запускаем проверку каждый день в 23:59
+    scheduler.add_job(check_results, 'cron', hour=23, minute=59)
+    scheduler.start()
+
     app = web.Application()
     app.router.add_get('/', handle_web)
     runner = web.AppRunner(app)
