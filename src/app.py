@@ -11,9 +11,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import pytz
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = None # Мы сохраним ваш ID, когда вы напишете боту
+CHAT_ID = None # Сохраняем ваш ID для вечерних сообщений
 
-# Инициализация биржи (без ключей, только чтение цены)
+# Инициализация биржи (только чтение цены, без ключей)
 exchange = ccxt.binance()
 MINSK_TZ = pytz.timezone('Europe/Minsk')
 
@@ -57,7 +57,6 @@ def get_today_range(user_id):
     return row
 
 def get_pending_predictions():
-    # Берем прогнозы за сегодня, у которых еще нет цены закрытия
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
@@ -99,6 +98,7 @@ async def cmd_start(message: types.Message):
         "🤖 Привет! Я твой ИИ-помощник по BTC.\n\n"
         "Пришли мне два числа (например: 64000 66000).\n"
         "В 23:59 я САМ проверю цену закрытия на бирже и запишу результат.\n"
+        "Команда /price покажет текущую цену.\n"
         "Команда /stats покажет статистику."
     )
 
@@ -111,6 +111,15 @@ async def cmd_stats(message: types.Message):
         percent = (correct / total) * 100
         await message.answer(f"📊 Статистика:\nВсего: {total}\nУгадал: {correct}\nТочность: {percent:.1f}%")
 
+@dp.message(Command("price"))
+async def cmd_price(message: types.Message):
+    try:
+        ticker = exchange.fetch_ticker('BTC/USDT')
+        current_price = float(ticker['last'])
+        await message.answer(f"💰 Текущая цена BTC: {current_price} USDT")
+    except Exception as e:
+        await message.answer(f"Не удалось узнать цену. Ошибка: {e}")
+
 @dp.message()
 async def handle_text(message: types.Message):
     text = message.text.lower()
@@ -118,7 +127,7 @@ async def handle_text(message: types.Message):
     numbers = re.findall(r'\d+', text)
     
     if not numbers:
-        await message.answer("Я не вижу цифр. Пришли мне два числа (диапазон).")
+        await message.answer("Я не вижу цифр. Пришли мне два числа (например: 64000 66000).")
         return
 
     if len(numbers) >= 2 and "закрытие" not in text:
@@ -145,7 +154,6 @@ async def check_results():
         return
 
     try:
-        # Получаем цену закрытия с биржи
         ticker = exchange.fetch_ticker('BTC/USDT')
         close_price = float(ticker['last'])
         print(f"Цена закрытия: {close_price}")
@@ -164,7 +172,6 @@ async def check_results():
         
         update_close(pred_id, user_id, close_price, prediction, is_correct)
         
-        # Отправляем сообщение пользователю, если знаем его ID
         if CHAT_ID:
             result_text = f"🔔 Итоги дня:\nЦена закрытия: {close_price}\nМой прогноз был: {prediction}\nРезультат: {'✅ Угадал!' if is_correct else '❌ Не угадал.'}"
             await bot.send_message(chat_id=CHAT_ID, text=result_text)
@@ -173,9 +180,7 @@ async def handle_web(request):
     return web.Response(text="Bot is running!")
 
 async def main():
-    # Настройка таймера
     scheduler = AsyncIOScheduler(timezone=MINSK_TZ)
-    # Запускаем проверку каждый день в 23:59
     scheduler.add_job(check_results, 'cron', hour=23, minute=59)
     scheduler.start()
 
