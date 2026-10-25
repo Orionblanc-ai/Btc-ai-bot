@@ -1,12 +1,75 @@
 import asyncio
 import os
 import re
+import sqlite3
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from datetime import datetime
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-user_data = {}
+
+# --- БАЗА ДАННЫХ ---
+def init_db():
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            date TEXT,
+            min_price REAL,
+            max_price REAL,
+            close_price REAL,
+            prediction TEXT,
+            is_correct INTEGER
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def save_range(user_id, min_p, max_p):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    today = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute('''
+        INSERT INTO predictions (user_id, date, min_price, max_price)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, today, min_p, max_p))
+    conn.commit()
+    conn.close()
+
+def get_today_range(user_id):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    today = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute('SELECT id, min_price, max_price FROM predictions WHERE user_id = ? AND date = ? ORDER BY id DESC LIMIT 1', (user_id, today))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
+def update_close(user_id, close_price, prediction, is_correct):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    today = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute('''
+        UPDATE predictions 
+        SET close_price = ?, prediction = ?, is_correct = ?
+        WHERE user_id = ? AND date = ? AND id = (SELECT MAX(id) FROM predictions WHERE user_id = ? AND date = ?)
+    ''', (close_price, prediction, is_correct, user_id, today, user_id, today))
+    conn.commit()
+    conn.close()
+
+def get_stats(user_id):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*), SUM(is_correct) FROM predictions WHERE user_id = ? AND is_correct IS NOT NULL', (user_id,))
+    total, correct = cursor.fetchone()
+    conn.close()
+    return total or 0, correct or 0
+
+init_db()
+# -------------------
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -15,58 +78,70 @@ dp = Dispatcher()
 async def cmd_start(message: types.Message):
     await message.answer(
         "🤖 Привет! Я твой ИИ-помощник по BTC.\n\n"
-        "Я стал умнее! Теперь ты можешь просто прислать мне два числа через пробел или запятую (например: 64000 66000), и я пойму, что это ночной диапазон.\n\n"
-        "А вечером просто напиши цену закрытия (например: 65000)."
+        "Пришли мне два числа (например: 64000 66000).\n"
+        "Вечером пришли цену закрытия (например: 65000).\n"
+        "Команда /stats покажет мою статистику."
     )
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    total, correct = get_stats(message.from_user.id)
+    if total == 0:
+        await message.answer("📊 Пока нет завершенных прогнозов.")
+    else:
+        percent = (correct / total) * 100
+        await message.answer(f"📊 Статистика:\nВсего: {total}\nУгадал: {correct}\nТочность: {percent:.1f}%")
 
 @dp.message()
 async def handle_text(message: types.Message):
     text = message.text.lower()
     user_id = message.from_user.id
-
-    # Ищем все числа в сообщении
     numbers = re.findall(r'\d+', text)
     
     if not numbers:
-        await message.answer("Я не вижу здесь цифр. Пришли мне два числа (мин и макс) или цену закрытия.")
+        await message.answer("Я не вижу цифр. Пришли мне два числа или цену закрытия.")
         return
 
-    # Если прислали два числа (например, "64000 66000")
+    # Если прислали два числа (ночной диапазон)
     if len(numbers) >= 2 and "закрытие" not in text and "цена" not in text:
         min_p = float(numbers[0])
         max_p = float(numbers[1])
-        user_data[user_id] = {"min": min_p, "max": max_p}
+        save_range(user_id, min_p, max_p)
         
         mid = (min_p + max_p) / 2
         await message.answer(
-            f"✅ Принял ночной диапазон: от {min_p} до {max_p}.\n"
+            f"✅ Записал диапазон: {min_p} - {max_p}.\n"
             f"Середина: {mid}.\n"
-            f"📊 Жду вечернюю цену закрытия, чтобы дать прогноз."
+            f"📊 Жду цену закрытия."
         )
         return
 
-    # Если прислали цену закрытия (одно число или есть слово "закрытие")
-    if user_id in user_data and "min" in user_data[user_id]:
+    # Если прислали цену закрытия
+    row = get_today_range(user_id)
+    if row:
         close_price = float(numbers[0])
-        min_p = user_data[user_id]["min"]
-        max_p = user_data[user_id]["max"]
+        pred_id, min_p, max_p = row
         mid = (min_p + max_p) / 2
         
         if close_price < mid:
-            result = f"📉 Цена {close_price} ниже середины ({mid}). Мой прогноз: SHORT."
+            prediction = "SHORT"
+            is_correct = 1 if close_price < (min_p + max_p)/2 else 0 
+            result = f"📉 Цена {close_price} ниже середины ({mid}). Прогноз: SHORT."
         else:
-            result = f"📈 Цена {close_price} выше середины ({mid}). Мой прогноз: LONG."
+            prediction = "LONG"
+            is_correct = 1 if close_price > (min_p + max_p)/2 else 0
+            result = f"📈 Цена {close_price} выше середины ({mid}). Прогноз: LONG."
+        
+        update_close(user_id, close_price, prediction, is_correct)
         
         await message.answer(
             f"🔔 Закрытие {close_price} принято.\n"
             f"{result}\n"
-            f"📝 Записал в статистику."
+            f"📝 Записал в базу. Проверь статистику командой /stats."
         )
-        # Сбрасываем данные на новый день
-        del user_data[user_id] 
         return
 
-    await message.answer("Я вижу цифры, но не понял логику. Пришли мне диапазон (2 числа) или цену закрытия (1 число).")
+    await message.answer("Я вижу цифры, но не понял логику. Пришли 2 числа (диапазон) или 1 число (закрытие).")
 
 async def handle_web(request):
     return web.Response(text="Bot is running!")
