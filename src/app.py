@@ -15,7 +15,8 @@ import pytz
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = None 
 
-exchange = ccxt.binance()
+# ВАЖНО: Используем Kraken вместо Binance, чтобы избежать геоблокировки
+exchange = ccxt.kraken()
 MINSK_TZ = pytz.timezone('Europe/Minsk')
 
 # --- БАЗА ДАННЫХ ---
@@ -82,7 +83,8 @@ init_db()
 # --- РАСЧЕТ RSI ---
 def get_rsi_prediction():
     try:
-        ohlcv = exchange.fetch_ohlcv('BTC/USDT', timeframe='1h', limit=100)
+        # Для Kraken тикер называется BTC/USD (или BTC/USDT)
+        ohlcv = exchange.fetch_ohlcv('BTC/USD', timeframe='1h', limit=100)
         closes = [candle[4] for candle in ohlcv]
         period = 14
         gains, losses = [], []
@@ -113,7 +115,6 @@ async def cmd_start(message: types.Message):
     global CHAT_ID
     CHAT_ID = message.chat.id
     
-    # Создаем главное меню с кнопками
     builder = InlineKeyboardBuilder()
     builder.button(text="💰 Узнать цену", callback_data="get_price")
     builder.button(text="📊 Моя статистика", callback_data="get_report")
@@ -132,10 +133,11 @@ async def handle_callbacks(callback: CallbackQuery):
     
     if callback.data == "get_price":
         try:
-            ticker = exchange.fetch_ticker('BTC/USDT')
+            # Берем цену с Kraken
+            ticker = exchange.fetch_ticker('BTC/USD')
             current_price = float(ticker['last'])
             formatted_price = f"{current_price:,.2f}".replace(',', ' ')
-            await callback.message.answer(f"💰 Текущая цена BTC: {formatted_price} USDT")
+            await callback.message.answer(f"💰 Текущая цена BTC: {formatted_price} USD")
         except Exception as e:
             await callback.message.answer(f"Ошибка получения цены: {e}")
         await callback.answer()
@@ -176,18 +178,16 @@ async def cmd_report(message: types.Message):
 async def handle_text(message: types.Message):
     text = message.text.lower().strip()
     
-    # 1. Проверка на цену (теперь ловит любые варианты)
     if "цена" in text or "курс" in text or "price" in text or "стоит" in text:
         try:
-            ticker = exchange.fetch_ticker('BTC/USDT')
+            ticker = exchange.fetch_ticker('BTC/USD')
             current_price = float(ticker['last'])
             formatted_price = f"{current_price:,.2f}".replace(',', ' ')
-            await message.answer(f"💰 Текущая цена BTC: {formatted_price} USDT")
+            await message.answer(f"💰 Текущая цена BTC: {formatted_price} USD")
         except Exception as e:
             await message.answer(f"Ошибка: {e}")
         return
         
-    # 2. Проверка на ваш прогноз
     if "мой прогноз" in text or "я думаю" in text:
         builder = InlineKeyboardBuilder()
         builder.button(text="🟢 Мой прогноз LONG", callback_data="user_LONG")
@@ -195,7 +195,6 @@ async def handle_text(message: types.Message):
         await message.answer("Выбери свой прогноз на сегодня:", reply_markup=builder.as_markup())
         return
         
-    # 3. Проверка на The One Trade (включая слово "тот")
     if "the one" in text or "traide" in text or "trade" in text or "модель" in text or text == "тот":
         builder = InlineKeyboardBuilder()
         builder.button(text="🟢 The One Trade: LONG", callback_data="model2_LONG")
@@ -219,7 +218,7 @@ async def morning_prediction():
     text = (
         f"🌅 Доброе утро! Мой анализ:\n\n"
         f"📊 Прогноз: {direction}\n"
-        f"💰 Цена входа: {formatted_price} USDT\n"
+        f"💰 Цена входа: {formatted_price} USD\n"
         f"💡 Причина: {reason}\n\n"
         f"Напиши «Мой прогноз» и «Тот», чтобы я записал ваши мнения!"
     )
@@ -232,7 +231,7 @@ async def evening_check():
     if not data: return
 
     bot_pred, entry, user_pred, model2_pred, _ = data
-    ticker = exchange.fetch_ticker('BTC/USDT')
+    ticker = exchange.fetch_ticker('BTC/USD')
     close_price = float(ticker['last'])
     
     actual_direction = "LONG" if close_price > entry else "SHORT"
