@@ -116,7 +116,7 @@ async def cmd_start(message: types.Message):
         "🤖 Привет! Я твой продвинутый ИИ-помощник.\n\n"
         "Я анализирую рынок в 10:30. Ты можешь ввести свой прогноз и прогноз модели The One Trade.\n"
         "В 23:59 я подведу итоги и сравню, кто был прав.\n\n"
-        "Просто напиши «Мой прогноз» или «The One Trade», и я дам кнопки для выбора."
+        "Просто напиши «Мой прогноз» или «Тот» (для The One Trade), и я дам кнопки для выбора."
     )
 
 @dp.message(Command("report"))
@@ -167,14 +167,15 @@ async def handle_text(message: types.Message):
         await message.answer("Выбери свой прогноз на сегодня:", reply_markup=builder.as_markup())
         return
         
-    if "the one" in text or "traide" in text or "trade" in text or "модель" in text:
+    # Проверка на The One Trade (включая слово "тот")
+    if "the one" in text or "traide" in text or "trade" in text or "модель" in text or text == "тот":
         builder = InlineKeyboardBuilder()
         builder.button(text="🟢 The One Trade: LONG", callback_data="model2_LONG")
         builder.button(text="🔴 The One Trade: SHORT", callback_data="model2_SHORT")
         await message.answer("Выбери прогноз от The One Trade:", reply_markup=builder.as_markup())
         return
 
-    await message.answer("Напиши «Какая цена», «Мой прогноз» или «The One Trade».")
+    await message.answer("Напиши «Какая цена», «Мой прогноз» или «Тот».")
 
 # --- УТРЕННИЙ ПРОГНОЗ В 10:30 ---
 async def morning_prediction():
@@ -192,7 +193,7 @@ async def morning_prediction():
         f"📊 Прогноз: {direction}\n"
         f"💰 Цена входа: {formatted_price} USDT\n"
         f"💡 Причина: {reason}\n\n"
-        f"Напиши «Мой прогноз» и «The One Trade», чтобы я записал ваши мнения!"
+        f"Напиши «Мой прогноз» и «Тот», чтобы я записал ваши мнения!"
     )
     if CHAT_ID: await bot.send_message(chat_id=CHAT_ID, text=text)
 
