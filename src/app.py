@@ -3,12 +3,11 @@ import os
 import re
 import sqlite3
 import ccxt
-import pandas as pd
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import CallbackQuery
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import pytz
@@ -24,75 +23,83 @@ def init_db():
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS bot_predictions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT,
-            direction TEXT,
-            entry_price REAL,
-            status TEXT DEFAULT 'pending' 
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT,
-            user_prediction TEXT,
+        CREATE TABLE IF NOT EXISTS daily_predictions (
+            date TEXT PRIMARY KEY,
             bot_prediction TEXT,
-            result TEXT
+            bot_entry REAL,
+            user_prediction TEXT,
+            model_2_prediction TEXT,
+            result TEXT DEFAULT 'pending'
         )
     ''')
     conn.commit()
     conn.close()
 
-def save_bot_prediction(date, direction, price):
+def update_bot_prediction(date, direction, entry):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('INSERT INTO bot_predictions (date, direction, entry_price) VALUES (?, ?, ?)', (date, direction, price))
+    cursor.execute('''
+        INSERT INTO daily_predictions (date, bot_prediction, bot_entry) 
+        VALUES (?, ?, ?)
+        ON CONFLICT(date) DO UPDATE SET bot_prediction=excluded.bot_prediction, bot_entry=excluded.bot_entry
+    ''', (date, direction, entry))
     conn.commit()
     conn.close()
 
-def get_pending_bot_prediction():
+def update_user_prediction(date, direction):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('UPDATE daily_predictions SET user_prediction = ? WHERE date = ?', (direction, date))
+    conn.commit()
+    conn.close()
+
+def update_model2_prediction(date, direction):
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('UPDATE daily_predictions SET model_2_prediction = ? WHERE date = ?', (direction, date))
+    conn.commit()
+    conn.close()
+
+def get_today_data():
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
-    cursor.execute('SELECT id, direction, entry_price FROM bot_predictions WHERE date = ? AND status = "pending" ORDER BY id DESC LIMIT 1', (today,))
+    cursor.execute('SELECT bot_prediction, bot_entry, user_prediction, model_2_prediction, result FROM daily_predictions WHERE date = ?', (today,))
     row = cursor.fetchone()
     conn.close()
     return row
 
-def resolve_prediction(pred_id, result):
+def get_stats():
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('UPDATE bot_predictions SET status = ? WHERE id = ?', (result, pred_id))
-    conn.commit()
+    cursor.execute('SELECT result, COUNT(*) FROM daily_predictions WHERE result != "pending" GROUP BY result')
+    rows = cursor.fetchall()
     conn.close()
+    return dict(rows)
 
 init_db()
 
-# --- ИНДИКАТОРЫ ---
+# --- РАСЧЕТ RSI ---
 def get_rsi_prediction():
     try:
-        # Берем 100 последних часовых свечей
         ohlcv = exchange.fetch_ohlcv('BTC/USDT', timeframe='1h', limit=100)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        closes = [candle[4] for candle in ohlcv]
+        period = 14
+        gains, losses = [], []
+        for i in range(1, len(closes)):
+            diff = closes[i] - closes[i-1]
+            if diff > 0:
+                gains.append(diff); losses.append(0)
+            else:
+                gains.append(0); losses.append(abs(diff))
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+        rsi = 100 if avg_loss == 0 else 100 - (100 / (1 + (avg_gain / avg_loss)))
+        current_price = closes[-1]
         
-        # Считаем RSI (14 периодов)
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-        
-        current_rsi = df['RSI'].iloc[-1]
-        current_price = df['close'].iloc[-1]
-        
-        if current_rsi < 30:
-            return "LONG", current_price, f"RSI = {current_rsi:.2f} (перепродан, ждем рост)"
-        elif current_rsi > 70:
-            return "SHORT", current_price, f"RSI = {current_rsi:.2f} (перекуплен, ждем падение)"
-        else:
-            # Если RSI в нейтральной зоне, бот не торгует, но мы можем дать легкий прогноз по тренду
-            return "WAIT", current_price, f"RSI = {current_rsi:.2f} (нет четкого сигнала)"
+        if rsi < 30: return "LONG", current_price, f"RSI = {rsi:.2f} (перепродан)"
+        elif rsi > 70: return "SHORT", current_price, f"RSI = {rsi:.2f} (перекуплен)"
+        else: return "WAIT", current_price, f"RSI = {rsi:.2f} (нет сигнала)"
     except Exception as e:
         print(f"Ошибка RSI: {e}")
         return "ERROR", 0, "Ошибка данных"
@@ -107,10 +114,41 @@ async def cmd_start(message: types.Message):
     CHAT_ID = message.chat.id
     await message.answer(
         "🤖 Привет! Я твой продвинутый ИИ-помощник.\n\n"
-        "Теперь я сам анализирую рынок в 10:30 и даю прогноз на основе RSI!\n"
-        "А в 23:59 я проверяю результат.\n\n"
-        "Также ты можешь спросить: «Какая сейчас цена?» или «Статистика»."
+        "Я анализирую рынок в 10:30. Ты можешь ввести свой прогноз и прогноз модели The One Trade.\n"
+        "В 23:59 я подведу итоги и сравню, кто был прав.\n\n"
+        "Просто напиши «Мой прогноз» или «The One Trade», и я дам кнопки для выбора."
     )
+
+@dp.message(Command("report"))
+async def cmd_report(message: types.Message):
+    stats = get_stats()
+    bot_wins = stats.get("BOT", 0)
+    user_wins = stats.get("USER", 0)
+    model2_wins = stats.get("MODEL_2", 0)
+    
+    await message.answer(
+        f"📊 Общая статистика побед:\n"
+        f"🤖 Бот: {bot_wins}\n"
+        f"👤 Вы: {user_wins}\n"
+        f"🧠 The One Trade: {model2_wins}\n\n"
+        f"*(Статистика обновляется после каждого вечернего закрытия)*"
+    )
+
+@dp.callback_query()
+async def handle_callbacks(callback: CallbackQuery):
+    date = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
+    
+    if callback.data.startswith("user_"):
+        prediction = callback.data.split("_")[1]
+        update_user_prediction(date, prediction)
+        await callback.message.answer(f"✅ Твой прогноз на сегодня: {prediction}. Записал!")
+        await callback.answer()
+        
+    elif callback.data.startswith("model2_"):
+        prediction = callback.data.split("_")[1]
+        update_model2_prediction(date, prediction)
+        await callback.message.answer(f"✅ Прогноз The One Trade на сегодня: {prediction}. Записал!")
+        await callback.answer()
 
 @dp.message()
 async def handle_text(message: types.Message):
@@ -121,89 +159,87 @@ async def handle_text(message: types.Message):
         price = f"{ticker['last']:,.2f}".replace(',', ' ')
         await message.answer(f"💰 Сейчас BTC стоит: {price} USDT")
         return
-
-    # Если пользователь нажал кнопку "Угадал/Не угадал"
-    if "✅" in text or "❌" in text:
-        # Логика обработки нажатия кнопки будет здесь
-        await message.answer("Я записал твой результат в статистику!")
+        
+    if "мой прогноз" in text:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🟢 Мой прогноз LONG", callback_data="user_LONG")
+        builder.button(text="🔴 Мой прогноз SHORT", callback_data="user_SHORT")
+        await message.answer("Выбери свой прогноз на сегодня:", reply_markup=builder.as_markup())
+        return
+        
+    if "the one" in text or "traide" in text or "trade" in text or "модель" in text:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🟢 The One Trade: LONG", callback_data="model2_LONG")
+        builder.button(text="🔴 The One Trade: SHORT", callback_data="model2_SHORT")
+        await message.answer("Выбери прогноз от The One Trade:", reply_markup=builder.as_markup())
         return
 
-    await message.answer("Я тебя не понял. Напиши «Какая сейчас цена» или дождись моего утреннего прогноза в 10:30.")
+    await message.answer("Напиши «Какая цена», «Мой прогноз» или «The One Trade».")
 
 # --- УТРЕННИЙ ПРОГНОЗ В 10:30 ---
 async def morning_prediction():
-    print("Делаю утренний прогноз...")
     direction, price, reason = get_rsi_prediction()
-    
-    if direction == "ERROR" or direction == "WAIT":
-        if CHAT_ID:
-            await bot.send_message(chat_id=CHAT_ID, text=f"⏳ Утренний анализ: {reason}. Сигнала на вход нет.")
+    if direction in ["ERROR", "WAIT"]:
+        if CHAT_ID: await bot.send_message(chat_id=CHAT_ID, text=f"⏳ Анализ: {reason}. Сигнала нет.")
         return
 
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
-    save_bot_prediction(today, direction, price)
+    update_bot_prediction(today, direction, price)
     formatted_price = f"{price:,.2f}".replace(',', ' ')
     
-    # Создаем кнопки для пользователя
-    builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Согласен с ботом", callback_data=f"agree_{direction}")
-    builder.button(text="❌ Мой прогноз другой", callback_data=f"disagree_{direction}")
-
     text = (
-        f"🌅 Доброе утро! Мой анализ на сегодня:\n\n"
+        f"🌅 Доброе утро! Мой анализ:\n\n"
         f"📊 Прогноз: {direction}\n"
         f"💰 Цена входа: {formatted_price} USDT\n"
         f"💡 Причина: {reason}\n\n"
-        f"Ты согласен со мной?"
+        f"Напиши «Мой прогноз» и «The One Trade», чтобы я записал ваши мнения!"
     )
-    
-    if CHAT_ID:
-        await bot.send_message(chat_id=CHAT_ID, text=text, reply_markup=builder.as_markup())
+    if CHAT_ID: await bot.send_message(chat_id=CHAT_ID, text=text)
 
 # --- ВЕЧЕРНЯЯ ПРОВЕРКА В 23:59 ---
 async def evening_check():
-    print("Проверяю вечерние результаты...")
-    pending = get_pending_bot_prediction()
-    if not pending:
-        return
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
+    data = get_today_data()
+    if not data: return
 
-    pred_id, direction, entry_price = pending
+    bot_pred, entry, user_pred, model2_pred, _ = data
     ticker = exchange.fetch_ticker('BTC/USDT')
     close_price = float(ticker['last'])
     
-    # Логика "Чистого знака"
-    is_correct = False
-    if direction == "LONG" and close_price > entry_price:
-        is_correct = True
-    elif direction == "SHORT" and close_price < entry_price:
-        is_correct = True
-        
-    result_status = "correct" if is_correct else "wrong"
-    resolve_prediction(pred_id, result_status)
+    actual_direction = "LONG" if close_price > entry else "SHORT"
     
-    formatted_close = f"{close_price:,.2f}".replace(',', ' ')
-    formatted_entry = f"{entry_price:,.2f}".replace(',', ' ')
+    winner = "NONE"
+    if bot_pred == actual_direction: winner = "BOT"
+    elif user_pred == actual_direction: winner = "USER"
+    elif model2_pred == actual_direction: winner = "MODEL_2"
     
-    emoji = "✅ УГАДАЛ!" if is_correct else "❌ НЕ УГАДАЛ."
+    conn = sqlite3.connect('bot_data.db')
+    cursor = conn.cursor()
+    cursor.execute('UPDATE daily_predictions SET result = ? WHERE date = ?', (winner, today))
+    conn.commit()
+    conn.close()
     
     text = (
         f"🌙 Итоги дня:\n"
-        f"Мой прогноз был: {direction} (вход {formatted_entry})\n"
-        f"Цена закрытия: {formatted_close}\n\n"
-        f"Результат: {emoji}"
+        f"Цена входа: {entry}\n"
+        f"Цена закрытия: {close_price}\n\n"
+        f"🤖 Бот: {bot_pred} {'✅' if bot_pred == actual_direction else '❌'}\n"
+        f"👤 Вы: {user_pred or '—'} {'✅' if user_pred == actual_direction else '❌'}\n"
+        f"🧠 The One Trade: {model2_pred or '—'} {'✅' if model2_pred == actual_direction else '❌'}\n\n"
     )
-    
-    if CHAT_ID:
-        await bot.send_message(chat_id=CHAT_ID, text=text)
+    if winner == "NONE":
+        text += "🤷 Победила дружба (все ошиблись или не вводили прогноз)."
+    else:
+        text += f"🏆 Победитель: {winner}!"
+        
+    if CHAT_ID: await bot.send_message(chat_id=CHAT_ID, text=text)
 
 async def handle_web(request):
     return web.Response(text="Bot is running!")
 
 async def main():
     scheduler = AsyncIOScheduler(timezone=MINSK_TZ)
-    # Утренний прогноз в 10:30
     scheduler.add_job(morning_prediction, 'cron', hour=10, minute=30)
-    # Вечерняя проверка в 23:59
     scheduler.add_job(evening_check, 'cron', hour=23, minute=59)
     scheduler.start()
 
