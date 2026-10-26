@@ -112,32 +112,49 @@ dp = Dispatcher()
 async def cmd_start(message: types.Message):
     global CHAT_ID
     CHAT_ID = message.chat.id
+    
+    # Создаем главное меню с кнопками
+    builder = InlineKeyboardBuilder()
+    builder.button(text="💰 Узнать цену", callback_data="get_price")
+    builder.button(text="📊 Моя статистика", callback_data="get_report")
+    
     await message.answer(
         "🤖 Привет! Я твой продвинутый ИИ-помощник.\n\n"
         "Я анализирую рынок в 10:30. Ты можешь ввести свой прогноз и прогноз модели The One Trade.\n"
         "В 23:59 я подведу итоги и сравню, кто был прав.\n\n"
-        "Просто напиши «Мой прогноз» или «Тот» (для The One Trade), и я дам кнопки для выбора."
-    )
-
-@dp.message(Command("report"))
-async def cmd_report(message: types.Message):
-    stats = get_stats()
-    bot_wins = stats.get("BOT", 0)
-    user_wins = stats.get("USER", 0)
-    model2_wins = stats.get("MODEL_2", 0)
-    
-    await message.answer(
-        f"📊 Общая статистика побед:\n"
-        f"🤖 Бот: {bot_wins}\n"
-        f"👤 Вы: {user_wins}\n"
-        f"🧠 The One Trade: {model2_wins}\n\n"
-        f"*(Статистика обновляется после каждого вечернего закрытия)*"
+        "Используй кнопки ниже или пиши: «Мой прогноз» / «Тот».",
+        reply_markup=builder.as_markup()
     )
 
 @dp.callback_query()
 async def handle_callbacks(callback: CallbackQuery):
     date = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     
+    if callback.data == "get_price":
+        try:
+            ticker = exchange.fetch_ticker('BTC/USDT')
+            current_price = float(ticker['last'])
+            formatted_price = f"{current_price:,.2f}".replace(',', ' ')
+            await callback.message.answer(f"💰 Текущая цена BTC: {formatted_price} USDT")
+        except Exception as e:
+            await callback.message.answer(f"Ошибка получения цены: {e}")
+        await callback.answer()
+        return
+
+    if callback.data == "get_report":
+        stats = get_stats()
+        bot_wins = stats.get("BOT", 0)
+        user_wins = stats.get("USER", 0)
+        model2_wins = stats.get("MODEL_2", 0)
+        await callback.message.answer(
+            f"📊 Общая статистика побед:\n"
+            f"🤖 Бот: {bot_wins}\n"
+            f"👤 Вы: {user_wins}\n"
+            f"🧠 The One Trade: {model2_wins}"
+        )
+        await callback.answer()
+        return
+        
     if callback.data.startswith("user_"):
         prediction = callback.data.split("_")[1]
         update_user_prediction(date, prediction)
@@ -150,24 +167,35 @@ async def handle_callbacks(callback: CallbackQuery):
         await callback.message.answer(f"✅ Прогноз The One Trade на сегодня: {prediction}. Записал!")
         await callback.answer()
 
+@dp.message(Command("report"))
+async def cmd_report(message: types.Message):
+    stats = get_stats()
+    await message.answer(f"📊 Бот: {stats.get('BOT', 0)} | Вы: {stats.get('USER', 0)} | Тот: {stats.get('MODEL_2', 0)}")
+
 @dp.message()
 async def handle_text(message: types.Message):
     text = message.text.lower().strip()
     
-    if "цена" in text or "курс" in text:
-        ticker = exchange.fetch_ticker('BTC/USDT')
-        price = f"{ticker['last']:,.2f}".replace(',', ' ')
-        await message.answer(f"💰 Сейчас BTC стоит: {price} USDT")
+    # 1. Проверка на цену (теперь ловит любые варианты)
+    if "цена" in text or "курс" in text or "price" in text or "стоит" in text:
+        try:
+            ticker = exchange.fetch_ticker('BTC/USDT')
+            current_price = float(ticker['last'])
+            formatted_price = f"{current_price:,.2f}".replace(',', ' ')
+            await message.answer(f"💰 Текущая цена BTC: {formatted_price} USDT")
+        except Exception as e:
+            await message.answer(f"Ошибка: {e}")
         return
         
-    if "мой прогноз" in text:
+    # 2. Проверка на ваш прогноз
+    if "мой прогноз" in text or "я думаю" in text:
         builder = InlineKeyboardBuilder()
         builder.button(text="🟢 Мой прогноз LONG", callback_data="user_LONG")
         builder.button(text="🔴 Мой прогноз SHORT", callback_data="user_SHORT")
         await message.answer("Выбери свой прогноз на сегодня:", reply_markup=builder.as_markup())
         return
         
-    # Проверка на The One Trade (включая слово "тот")
+    # 3. Проверка на The One Trade (включая слово "тот")
     if "the one" in text or "traide" in text or "trade" in text or "модель" in text or text == "тот":
         builder = InlineKeyboardBuilder()
         builder.button(text="🟢 The One Trade: LONG", callback_data="model2_LONG")
@@ -175,7 +203,7 @@ async def handle_text(message: types.Message):
         await message.answer("Выбери прогноз от The One Trade:", reply_markup=builder.as_markup())
         return
 
-    await message.answer("Напиши «Какая цена», «Мой прогноз» или «Тот».")
+    await message.answer("Я тебя не понял. Напиши «Цена», «Мой прогноз» или «Тот».")
 
 # --- УТРЕННИЙ ПРОГНОЗ В 10:30 ---
 async def morning_prediction():
