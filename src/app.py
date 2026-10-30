@@ -80,7 +80,7 @@ def get_stats():
 
 init_db()
 
-# --- ФУНКЦИЯ ПОЛУЧЕНИЯ ЦЕНЫ (BTC, ETH, SOL) ---
+# --- ФУНКЦИЯ ПОЛУЧЕНИЯ ЦЕНЫ ---
 def get_price_and_symbol(text):
     symbol = 'BTC/USD'
     name = 'BTC'
@@ -117,17 +117,18 @@ def get_rsi_prediction():
         rsi = 100 if avg_loss == 0 else 100 - (100 / (1 + (avg_gain / avg_loss)))
         current_price = closes[-1]
         
-        # Считаем волатильность (ATR-подобно) для стопа
+        # Волатильность для стопов
         recent_highs = [candle[2] for candle in ohlcv[-14:]]
         recent_lows = [candle[3] for candle in ohlcv[-14:]]
         volatility = (sum(recent_highs) - sum(recent_lows)) / 14
-        if volatility == 0: volatility = current_price * 0.015 # страховка 1.5%
+        if volatility == 0: volatility = current_price * 0.015
         
-        if rsi < 30:
+        # Новые уровни: 35 и 65
+        if rsi < 35:
             stop_loss = current_price - (volatility * 1.5)
             take_profit = current_price + (volatility * 3)
             return "LONG", current_price, stop_loss, take_profit, f"RSI = {rsi:.2f} (перепродан)"
-        elif rsi > 70:
+        elif rsi > 65:
             stop_loss = current_price + (volatility * 1.5)
             take_profit = current_price - (volatility * 3)
             return "SHORT", current_price, stop_loss, take_profit, f"RSI = {rsi:.2f} (перекуплен)"
@@ -148,14 +149,16 @@ async def cmd_start(message: types.Message):
     
     builder = InlineKeyboardBuilder()
     builder.button(text="💰 Узнать цену BTC", callback_data="get_price")
+    builder.button(text="📈 Прогноз сейчас", callback_data="get_forecast")
     builder.button(text="📊 Моя статистика", callback_data="get_report")
+    builder.button(text="❓ Помощь", callback_data="get_help")
+    builder.adjust(2, 2) # Красиво выстраиваем кнопки в 2 ряда
     
     await message.answer(
         "🤖 Привет! Я твой продвинутый ИИ-помощник.\n\n"
-        "Я анализирую рынок в 10:30 (считаю RSI и стопы).\n"
-        "Ты можешь ввести свой прогноз и прогноз модели The One Trade.\n"
-        "В 23:59 я подведу итоги и сравню, кто был прав.\n\n"
-        "Используй кнопки ниже или пиши: «Цена», «Цена эфира», «Мой прогноз» / «Тот».",
+        "Я анализирую рынок в 11:30 (считаю RSI и стопы).\n"
+        "Ты можешь запросить анализ в любой момент кнопкой «Прогноз сейчас».\n\n"
+        "В 23:59 я подведу итоги и сравню, кто был прав.",
         reply_markup=builder.as_markup()
     )
 
@@ -166,9 +169,40 @@ async def handle_callbacks(callback: CallbackQuery):
     if callback.data == "get_price":
         await callback.message.answer(get_price_and_symbol("btc"), parse_mode="HTML")
         await callback.answer()
-        return
-
-    if callback.data == "get_report":
+        
+    elif callback.data == "get_help":
+        await callback.message.answer(
+            "📖 <b>Как пользоваться ботом:</b>\n\n"
+            "1. Я сам пришлю прогноз в 11:30.\n"
+            "2. Нажми «Мой прогноз» (LONG/SHORT) и «Тот» для The One Trade.\n"
+            "3. В 23:59 я пришлю итоговый отчет.\n"
+            "4. Кнопка «Цена» покажет курс BTC, ETH или SOL.", 
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        
+    elif callback.data == "get_forecast":
+        direction, price, sl, tp, reason = get_rsi_prediction()
+        if direction == "WAIT":
+            await callback.message.answer(f"⏳ <b>Анализ рынка:</b>\n\n<i>{reason}</i>\nСигнала на вход нет.", parse_mode="HTML")
+        elif direction == "ERROR":
+            await callback.message.answer("Ошибка получения данных с биржи.")
+        else:
+            f_price = f"{price:,.2f}".replace(',', ' ')
+            f_sl = f"{sl:,.2f}".replace(',', ' ')
+            f_tp = f"{tp:,.2f}".replace(',', ' ')
+            text = (
+                f"📈 <b>Анализ рынка:</b>\n\n"
+                f"📊 Прогноз: <b>{direction}</b>\n"
+                f"💰 Цена входа: <b>{f_price} USD</b>\n"
+                f"🛑 Стоп-лосс: <i>{f_sl} USD</i>\n"
+                f"🎯 Тейк-профит: <i>{f_tp} USD</i>\n"
+                f"💡 Причина: <i>{reason}</i>"
+            )
+            await callback.message.answer(text, parse_mode="HTML")
+        await callback.answer()
+        
+    elif callback.data == "get_report":
         stats = get_stats()
         bot_wins = stats.get("BOT", 0)
         user_wins = stats.get("USER", 0)
@@ -180,9 +214,8 @@ async def handle_callbacks(callback: CallbackQuery):
             f"🧠 The One Trade: {model2_wins}", parse_mode="HTML"
         )
         await callback.answer()
-        return
         
-    if callback.data.startswith("user_"):
+    elif callback.data.startswith("user_"):
         prediction = callback.data.split("_")[1]
         update_user_prediction(date, prediction)
         await callback.message.answer(f"✅ Твой прогноз на сегодня: <b>{prediction}</b>. Записал!", parse_mode="HTML")
@@ -203,12 +236,10 @@ async def cmd_report(message: types.Message):
 async def handle_text(message: types.Message):
     text = message.text.lower().strip()
     
-    # 1. Проверка на цену (BTC, ETH, SOL)
     if any(word in text for word in ["цена", "курс", "price", "стоит"]):
         await message.answer(get_price_and_symbol(text), parse_mode="HTML")
         return
         
-    # 2. Проверка на ваш прогноз
     if "мой прогноз" in text or "я думаю" in text:
         builder = InlineKeyboardBuilder()
         builder.button(text="🟢 Мой прогноз LONG", callback_data="user_LONG")
@@ -216,7 +247,6 @@ async def handle_text(message: types.Message):
         await message.answer("Выбери свой прогноз на сегодня:", reply_markup=builder.as_markup())
         return
         
-    # 3. Проверка на The One Trade
     if "the one" in text or "traide" in text or "trade" in text or "модель" in text or text == "тот":
         builder = InlineKeyboardBuilder()
         builder.button(text="🟢 The One Trade: LONG", callback_data="model2_LONG")
@@ -224,17 +254,19 @@ async def handle_text(message: types.Message):
         await message.answer("Выбери прогноз от The One Trade:", reply_markup=builder.as_markup())
         return
 
-    await message.answer("Я тебя не понял. Напиши «Цена», «Мой прогноз» или «Тот».")
+    await message.answer("Я тебя не понял. Используй меню ниже или напиши «Цена».")
 
-# --- УТРЕННИЙ ПРОГНОЗ В 10:30 ---
+# --- УТРЕННИЙ ПРОГНОЗ В 11:30 С КНОПКАМИ ---
 async def morning_prediction():
     direction, price, sl, tp, reason = get_rsi_prediction()
+    
     if direction in ["ERROR", "WAIT"]:
-        if CHAT_ID: await bot.send_message(chat_id=CHAT_ID, text=f"⏳ Анализ: {reason}. Сигнала нет.")
+        if CHAT_ID: await bot.send_message(chat_id=CHAT_ID, text=f"⏳ <b>Утренний анализ:</b>\n\n<i>{reason}</i>\nСигнала на вход нет.", parse_mode="HTML")
         return
 
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     update_bot_prediction(today, direction, price)
+    
     f_price = f"{price:,.2f}".replace(',', ' ')
     f_sl = f"{sl:,.2f}".replace(',', ' ')
     f_tp = f"{tp:,.2f}".replace(',', ' ')
@@ -246,9 +278,18 @@ async def morning_prediction():
         f"🛑 Стоп-лосс: <i>{f_sl} USD</i>\n"
         f"🎯 Тейк-профит: <i>{f_tp} USD</i>\n"
         f"💡 Причина: <i>{reason}</i>\n\n"
-        f"Напиши «Мой прогноз» и «Тот», чтобы я записал ваши мнения!"
+        f"<b>Сделай свой выбор:</b>"
     )
-    if CHAT_ID: await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
+    
+    # Сразу добавляем кнопки в утренний прогноз
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🟢 Мой: LONG", callback_data="user_LONG")
+    builder.button(text="🔴 Мой: SHORT", callback_data="user_SHORT")
+    builder.button(text="🟢 Тот: LONG", callback_data="model2_LONG")
+    builder.button(text="🔴 Тот: SHORT", callback_data="model2_SHORT")
+    builder.adjust(2, 2)
+    
+    if CHAT_ID: await bot.send_message(chat_id=CHAT_ID, text=text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 # --- ВЕЧЕРНЯЯ ПРОВЕРКА В 23:59 ---
 async def evening_check():
@@ -257,8 +298,11 @@ async def evening_check():
     if not data: return
 
     bot_pred, entry, user_pred, model2_pred, _ = data
-    ticker = exchange.fetch_ticker('BTC/USD')
-    close_price = float(ticker['last'])
+    try:
+        ticker = exchange.fetch_ticker('BTC/USD')
+        close_price = float(ticker['last'])
+    except:
+        return
     
     actual_direction = "LONG" if close_price > entry else "SHORT"
     
@@ -296,7 +340,8 @@ async def handle_web(request):
 
 async def main():
     scheduler = AsyncIOScheduler(timezone=MINSK_TZ)
-    scheduler.add_job(morning_prediction, 'cron', hour=10, minute=30)
+    # Время изменено на 11:30
+    scheduler.add_job(morning_prediction, 'cron', hour=11, minute=30)
     scheduler.add_job(evening_check, 'cron', hour=23, minute=59)
     scheduler.start()
 
