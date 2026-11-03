@@ -19,7 +19,6 @@ exchange = ccxt.kraken()
 def init_db():
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    # Таблица для активов (крипта, акции, металлы)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,7 +29,6 @@ def init_db():
             location TEXT
         )
     ''')
-    # Таблица для баланса биржи
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS exchange_balance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,8 +92,7 @@ def get_gold_price_per_gram():
         ticker = yf.Ticker("GC=F")
         hist = ticker.history(period="1d")
         if not hist.empty:
-            price_per_ounce = float(hist['Close'].iloc[-1])
-            return price_per_ounce / 31.1035
+            return float(hist['Close'].iloc[-1]) / 31.1035
         return None
     except:
         return None
@@ -111,17 +108,18 @@ async def cmd_start(message: types.Message):
     
     builder = InlineKeyboardBuilder()
     builder.button(text="📊 Мой портфель", callback_data="show_portfolio")
-    builder.button(text="❓ Как вводить данные", callback_data="help_add")
+    builder.button(text="❓ Как вводить", callback_data="help_add")
     builder.button(text="🗑 Очистить всё", callback_data="clear_db")
     
     await message.answer(
-        "🤖 Привет! Я твой личный портфельный менеджер.\n\n"
-        "Я умею считать общий капитал, разделяя его на биржевой счет и физические активы.\n\n"
-        "Команды:\n"
-        "• <code>На бирже 2000</code> (установить баланс)\n"
-        "• <code>Купил 0.001 BTC по 75000</code>\n"
+        "🤖 Привет! Я твой портфельный менеджер.\n\n"
+        "Примеры команд:\n"
+        "• <code>Баланс на бирже 2000</code>\n"
+        "• <code>Купил 0,001 BTC по 75000</code>\n"
+        "• <code>Купил 0.5 ETH по 2300</code>\n"
         "• <code>Купил 10 грамм золота по 80</code>\n"
-        "• <code>Купил 5 Славянка по 350</code>",
+        "• <code>Купил 5 Славянка по 340</code>\n"
+        "• <code>Купил 25 SPCE по 2,8</code>",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -132,69 +130,74 @@ async def handle_callbacks(callback: CallbackQuery):
         await show_portfolio(callback.message)
         await callback.answer()
     elif callback.data == "help_add":
-        await callback.message.answer(
-            "Вводи данные так:\n\n"
-            "1. <b>Баланс биржи:</b> <code>На бирже 2000</code>\n"
-            "2. <b>Крипта:</b> <code>Купил 0.001 BTC по 75000</code>\n"
-            "3. <b>Золото:</b> <code>Купил 10 грамм золота по 80</code>\n"
-            "4. <b>Славянка:</b> <code>Купил 5 Славянка по 350</code>",
-            parse_mode="HTML"
-        )
+        await callback.message.answer("Пиши: «Баланс на бирже 2000» или «Купил 0,1 BTC по 75000».")
         await callback.answer()
     elif callback.data == "clear_db":
         clear_db()
-        await callback.message.answer("🗑 Все данные очищены. Начинаем с чистого листа.")
+        await callback.message.answer("🗑 Все данные очищены.")
         await callback.answer()
 
 @dp.message()
 async def handle_text(message: types.Message):
-    text = message.text.strip()
+    text = message.text.strip().lower().replace(',', '.') # Заменяем запятые на точки
     
-    # 1. Установка баланса биржи
-    balance_match = re.search(r'на бирже\s+([\d.,]+)', text, re.IGNORECASE)
+    # 1. Установка баланса
+    balance_match = re.search(r'(?:баланс\s+на\s+бирже|на\s+бирже)\s+([\d.]+)', text)
     if balance_match:
-        amount = float(balance_match.group(1).replace(',', '.'))
+        amount = float(balance_match.group(1))
         set_exchange_balance(amount)
         await message.answer(f"✅ Баланс биржи установлен: <b>{amount:,.2f} USD</b>", parse_mode="HTML")
         return
 
-    # 2. Добавление актива
-    match = re.search(r'купил\s+([\d.,]+)\s+([a-zA-Zа-яА-Я\s]+)\s+по\s+([\d.,]+)', text, re.IGNORECASE)
+    # 2. Умный поиск актива (ищем все числа и слова)
+    # Паттерн: "купил", затем любые слова/числа, "по", затем число
+    match = re.search(r'купил\s+(.+?)\s+по\s+([\d.]+)', text, re.IGNORECASE)
     if match:
-        amount = float(match.group(1).replace(',', '.'))
-        asset = match.group(2).strip().upper()
-        buy_price = float(match.group(3).replace(',', '.'))
+        part1 = match.group(1) # То, что до "по" (например: "btc 0.001" или "25 spce")
+        buy_price = float(match.group(2))
         
+        # Ищем числа в part1
+        numbers = re.findall(r'[\d.]+', part1)
+        if not numbers:
+            await message.answer("Не нашел количество. Пример: «Купил 0,001 BTC по 75000»")
+            return
+        amount = float(numbers[0])
+        
+        # Ищем название актива (убираем числа из строки)
+        asset_name = re.sub(r'[\d.]+', '', part1).strip().upper()
+        if not asset_name: asset_name = "UNKNOWN"
+        
+        # Распределяем типы
         asset_type = 'crypto'
         location = 'exchange'
         
-        if "ЗОЛОТ" in asset or "GOLD" in asset:
-            asset = 'GOLD'
+        if "ЗОЛОТ" in asset_name or "GOLD" in asset_name:
+            asset_name = 'GOLD'
             asset_type = 'metal'
             location = 'physical'
-        elif "СЛАВЯНКА" in asset or "МОНЕТ" in asset:
-            asset = 'СЛАВЯНКА'
+        elif "СЛАВЯНКА" in asset_name or "МОНЕТ" in asset_name:
+            asset_name = 'СЛАВЯНКА'
             asset_type = 'coin'
             location = 'physical'
-        elif len(asset) <= 5 and not asset in ['BTC', 'ETH', 'SOL', 'XRP']: 
+        elif len(asset_name) <= 5 and not asset_name in ['BTC', 'ETH', 'SOL', 'XRP', 'USDT']: 
             asset_type = 'stock'
             
-        add_asset(asset, amount, buy_price, asset_type, location)
-        await message.answer(f"✅ Добавлено: <b>{amount} {asset}</b> по цене <b>{buy_price}</b>.", parse_mode="HTML")
+        add_asset(asset_name, amount, buy_price, asset_type, location)
+        await message.answer(f"✅ Добавлено: <b>{amount} {asset_name}</b> по цене <b>{buy_price}</b>.", parse_mode="HTML")
         return
         
-    if "портфель" in text.lower():
+    if "портфель" in text:
         await show_portfolio(message)
         return
         
-    await message.answer("Я не понял. Напиши «Портфель» или добавь актив: «Купил 0.1 BTC по 75000».")
+    await message.answer("Я не понял. Пример: «Купил 0,001 BTC по 75000» или «Баланс на бирже 2000».")
 
 async def show_portfolio(message: types.Message):
     portfolio = get_portfolio()
     exchange_balance = get_exchange_balance()
     
     if not portfolio and exchange_balance == 0:
-        await message.answer("Твой портфель пуст. Начни с команды: «На бирже 2000» или «Купил 0.1 BTC по 75000».")
+        await message.answer("Портфель пуст. Начни с: «Баланс на бирже 2000»")
         return
         
     gold_price_g = get_gold_price_per_gram()
@@ -218,8 +221,7 @@ async def show_portfolio(message: types.Message):
                 hist = yf.Ticker(asset).history(period="1d")
                 if not hist.empty:
                     current_price = float(hist['Close'].iloc[-1])
-            except:
-                pass
+            except: pass
         elif asset_type == 'metal':
             current_price = gold_price_g
         elif asset_type == 'coin':
@@ -232,7 +234,7 @@ async def show_portfolio(message: types.Message):
             
             line = (
                 f"🔸 {asset}: {amount} ед.\n"
-                f"   Сейчас: {current_price:,.2f} | Стоимость: {current_total:,.2f} {sign} ({profit:+,.2f})\n"
+                f"   Цена: {current_price:,.2f} | Стоимость: {current_total:,.2f} {sign} ({profit:+,.2f})\n"
             )
             
             if location == 'exchange':
@@ -244,17 +246,14 @@ async def show_portfolio(message: types.Message):
                 physical_value += current_total
                 has_physical_assets = True
 
-    if not has_exchange_assets:
-        text_exchange += "   (Пусто)\n"
-    if not has_physical_assets:
-        text_physical += "   (Пусто)\n"
+    if not has_exchange_assets: text_exchange += "   (Пусто)\n"
+    if not has_physical_assets: text_physical += "   (Пусто)\n"
         
-    # Считаем общий капитал
     total_capital = exchange_balance + physical_value
     
     final_text = "📊 <b>Твой инвестиционный портфель:</b>\n\n"
     final_text += text_exchange
-    final_text += f"   💵 Свободный баланс (или общий счет): {exchange_balance:,.2f} USD\n"
+    final_text += f"   💵 Баланс: {exchange_balance:,.2f} USD\n"
     final_text += f"   📈 Стоимость крипты: {exchange_crypto_value:,.2f} USD\n\n"
     
     final_text += text_physical
@@ -274,8 +273,6 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 10000)
     await site.start()
-    
-    print("Бот-портфель запущен...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
