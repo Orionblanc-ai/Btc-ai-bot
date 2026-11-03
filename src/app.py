@@ -113,13 +113,14 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         "🤖 Привет! Я твой портфельный менеджер.\n\n"
-        "Примеры команд:\n"
+        "Я понимаю русские буквы и любые формулировки!\n"
+        "Примеры:\n"
         "• <code>Баланс на бирже 2000</code>\n"
-        "• <code>Купил 0,001 BTC по 75000</code>\n"
-        "• <code>Купил 0.5 ETH по 2300</code>\n"
+        "• <code>Купил 0,001 ВТС по 78000</code>\n"
+        "• <code>Купил 0.5 ЕТН по 2300</code>\n"
         "• <code>Купил 10 грамм золота по 80</code>\n"
         "• <code>Купил 5 Славянка по 340</code>\n"
-        "• <code>Купил 25 SPCE по 2,8</code>",
+        "• <code>Купил 25 КО по 2,8</code> (акции)",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -130,7 +131,7 @@ async def handle_callbacks(callback: CallbackQuery):
         await show_portfolio(callback.message)
         await callback.answer()
     elif callback.data == "help_add":
-        await callback.message.answer("Пиши: «Баланс на бирже 2000» или «Купил 0,1 BTC по 75000».")
+        await callback.message.answer("Пиши: «Баланс на бирже 2000» или «Купил 0,1 ВТС по 75000».")
         await callback.answer()
     elif callback.data == "clear_db":
         clear_db()
@@ -152,21 +153,33 @@ async def handle_text(message: types.Message):
     # 2. Умный поиск актива
     match = re.search(r'купил\s+(.+?)\s+по\s+([\d.]+)', text, re.IGNORECASE)
     if match:
-        part1 = match.group(1)
+        part1 = match.group(1) 
         buy_price = float(match.group(2))
         
         numbers = re.findall(r'[\d.]+', part1)
         if not numbers:
-            await message.answer("Не нашел количество. Пример: «Купил 0,001 BTC по 75000»")
+            await message.answer("Не нашел количество. Пример: «Купил 0,001 ВТС по 75000»")
             return
         amount = float(numbers[0])
         
         asset_name = re.sub(r'[\d.]+', '', part1).strip().upper()
-        if not asset_name: asset_name = "UNKNOWN"
+        
+        # --- СЛОВАРЬ ПЕРЕВОДОВ (РУС -> ЛАТ) ---
+        translations = {
+            'ВТС': 'BTC', 'БИТКОИН': 'BTC', 'БИТКОЙН': 'BTC', 'ВТС': 'BTC',
+            'ЕТН': 'ETH', 'ЭФИР': 'ETH', 'ЭФИРИУМ': 'ETH', 
+            'СОЛ': 'SOL', 'СОЛАНА': 'SOL',
+            'РИПЛ': 'XRP', 'ДОГЕ': 'DOGE', 'ДОДЖ': 'DOGE',
+            'КОЛА': 'KO', 'КОК': 'KO', 'КОКА': 'KO'
+        }
+        
+        # Если слово есть в словаре, заменяем на латиницу
+        if asset_name in translations:
+            asset_name = translations[asset_name]
         
         # --- ЛОГИКА РАСПРЕДЕЛЕНИЯ ---
         asset_type = 'crypto'
-        location = 'exchange' # По умолчанию всё идет на биржу
+        location = 'exchange'
         
         if "ЗОЛОТ" in asset_name or "GOLD" in asset_name:
             asset_name = 'GOLD'
@@ -176,8 +189,8 @@ async def handle_text(message: types.Message):
             asset_name = 'СЛАВЯНКА'
             asset_type = 'coin'
             location = 'physical'
-        elif asset_name in ['SPCE', 'AAPL', 'TSLA', 'NVDA', 'KO', 'MSFT', 'GOOG']: 
-            # Список известных акций (можно расширять)
+        elif len(asset_name) <= 5 and asset_name not in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'USDT']:
+            # Если это не крипта и не физика, но короткое - считаем акцией
             asset_type = 'stock'
             
         add_asset(asset_name, amount, buy_price, asset_type, location)
@@ -188,7 +201,7 @@ async def handle_text(message: types.Message):
         await show_portfolio(message)
         return
         
-    await message.answer("Я не понял. Пример: «Купил 0,001 BTC по 75000» или «Баланс на бирже 2000».")
+    await message.answer("Я не понял. Пример: «Купил 0,001 ВТС по 75000» или «Баланс на бирже 2000».")
 
 async def show_portfolio(message: types.Message):
     portfolio = get_portfolio()
