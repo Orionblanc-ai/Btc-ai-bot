@@ -22,9 +22,9 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            asset TEXT,
+            asset TEXT UNIQUE,
             amount REAL,
-            buy_price REAL,
+            avg_buy_price REAL,
             asset_type TEXT,
             location TEXT
         )
@@ -41,7 +41,23 @@ def init_db():
 def add_asset(asset, amount, buy_price, asset_type, location="exchange"):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('INSERT INTO portfolio (asset, amount, buy_price, asset_type, location) VALUES (?, ?, ?, ?, ?)', (asset, amount, buy_price, asset_type, location))
+    
+    # Проверяем, есть ли уже такой актив
+    cursor.execute('SELECT id, amount, avg_buy_price FROM portfolio WHERE asset = ?', (asset,))
+    row = cursor.fetchone()
+    
+    if row:
+        # Если есть - усредняем
+        current_id, current_amount, current_avg_price = row
+        new_total_amount = current_amount + amount
+        # Формула средней цены: (Старое кол-во * Старая цена + Новое кол-во * Новая цена) / Общее кол-во
+        new_avg_price = ((current_amount * current_avg_price) + (amount * buy_price)) / new_total_amount
+        
+        cursor.execute('UPDATE portfolio SET amount = ?, avg_buy_price = ? WHERE id = ?', (new_total_amount, new_avg_price, current_id))
+    else:
+        # Если нет - создаем новую запись
+        cursor.execute('INSERT INTO portfolio (asset, amount, avg_buy_price, asset_type, location) VALUES (?, ?, ?, ?, ?)', (asset, amount, buy_price, asset_type, location))
+        
     conn.commit()
     conn.close()
 
@@ -64,7 +80,7 @@ def get_exchange_balance():
 def get_portfolio():
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT asset, amount, buy_price, asset_type, location FROM portfolio')
+    cursor.execute('SELECT asset, amount, avg_buy_price, asset_type, location FROM portfolio')
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -113,11 +129,13 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         "🤖 Привет! Я твой портфельный менеджер.\n\n"
+        "Теперь я умею складывать одинаковые активы!\n"
+        "Если купишь золото дважды, я посчитаю среднюю цену покупки.\n\n"
         "Примеры команд:\n"
-        "• <code>Баланс на бирже 1500</code>\n"
+        "• <code>Баланс на бирже 2000</code>\n"
         "• <code>Купил 0,001 ВТС по 78000</code>\n"
         "• <code>Купил 0.5 ЕТН по 2300</code>\n"
-        "• <code>Купил 10 грамм золота по 80</code>\n"
+        "• <code>Купил 1 грамм золота по 80</code>\n"
         "• <code>Купил 25 SPCE по 2,8</code>",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
@@ -129,7 +147,7 @@ async def handle_callbacks(callback: CallbackQuery):
         await show_portfolio(callback.message)
         await callback.answer()
     elif callback.data == "help_add":
-        await callback.message.answer("Пиши: «Баланс на бирже 1500» или «Купил 0,1 ВТС по 75000».")
+        await callback.message.answer("Пиши: «Баланс на бирже 2000» или «Купил 0,1 ВТС по 75000». Повторные покупки усредняются.")
         await callback.answer()
     elif callback.data == "clear_db":
         clear_db()
@@ -189,27 +207,27 @@ async def handle_text(message: types.Message):
             asset_type = 'stock'
             
         add_asset(asset_name, amount, buy_price, asset_type, location)
-        await message.answer(f"✅ Добавлено: <b>{amount} {asset_name}</b> по цене <b>{buy_price}</b>.", parse_mode="HTML")
+        await message.answer(f"✅ Добавлено/усреднено: <b>{asset_name}</b>. Цена покупки: <b>{buy_price}</b>.", parse_mode="HTML")
         return
         
     if "портфель" in text:
         await show_portfolio(message)
         return
         
-    await message.answer("Я не понял. Пример: «Купил 0,001 ВТС по 75000» или «Баланс на бирже 1500».")
+    await message.answer("Я не понял. Пример: «Купил 0,001 ВТС по 75000» или «Баланс на бирже 2000».")
 
 async def show_portfolio(message: types.Message):
     portfolio = get_portfolio()
     total_exchange_balance = get_exchange_balance()
     
     if not portfolio and total_exchange_balance == 0:
-        await message.answer("Портфель пуст. Начни с: «Баланс на бирже 1500»")
+        await message.answer("Портфель пуст. Начни с: «Баланс на бирже 2000»")
         return
         
     gold_price_g = get_gold_price_per_gram()
     
-    exchange_assets_value = 0  # Стоимость купленных активов (крипта + акции)
-    physical_value = 0         # Стоимость физики (золото + монеты)
+    exchange_assets_value = 0
+    physical_value = 0
     
     text_exchange = "🏦 <b>Биржевой счет:</b>\n"
     text_physical = "🏠 <b>Физические активы:</b>\n"
@@ -217,7 +235,8 @@ async def show_portfolio(message: types.Message):
     has_exchange_assets = False
     has_physical_assets = False
 
-    for asset, amount, buy_price, asset_type, location in portfolio:
+    # Проходимся по УНИКАЛЬНЫМ активам (благодаря UNIQUE в БД)
+    for asset, amount, avg_buy_price, asset_type, location in portfolio:
         current_price = None
         
         if asset_type == 'crypto':
@@ -231,16 +250,18 @@ async def show_portfolio(message: types.Message):
         elif asset_type == 'metal':
             current_price = gold_price_g
         elif asset_type == 'coin':
-            current_price = buy_price 
+            current_price = avg_buy_price # Для монет считаем цену стабильной
             
         if current_price:
             current_total = amount * current_price
-            profit = (current_price - buy_price) * amount
-            sign = "🟢" if profit >= 0 else "🔴"
+            total_buy_cost = amount * avg_buy_price
+            profit = current_total - total_buy_cost
+            profit_sign = "🟢" if profit >= 0 else "🔴"
             
             line = (
-                f"🔸 {asset}: {amount} ед.\n"
-                f"   Цена: {current_price:,.2f} | Стоимость: {current_total:,.2f} {sign} ({profit:+,.2f})\n"
+                f"🔸 <b>{asset}</b>: {amount} ед.\n"
+                f"   Среди. покупка: {avg_buy_price:,.2f} | Сейчас: {current_price:,.2f}\n"
+                f"   Стоимость: {current_total:,.2f} {profit_sign} ({profit:+,.2f})\n"
             )
             
             if location == 'exchange':
