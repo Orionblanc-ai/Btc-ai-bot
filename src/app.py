@@ -71,13 +71,11 @@ def sell_asset(asset, amount):
         return "too_much"
         
     if amount == current_amount:
-        # Продали всё - удаляем позицию
         cursor.execute('DELETE FROM portfolio WHERE id = ?', (current_id,))
         conn.commit()
         conn.close()
         return "all_sold"
     else:
-        # Продали часть - уменьшаем количество, средняя цена не меняется
         new_amount = current_amount - amount
         cursor.execute('UPDATE portfolio SET amount = ? WHERE id = ?', (new_amount, current_id))
         conn.commit()
@@ -136,6 +134,27 @@ def get_gold_price_per_gram():
     except:
         return None
 
+# --- УМНЫЙ ПАРСЕР НАЗВАНИЙ ---
+def parse_asset_name(raw_name):
+    name = raw_name.strip().upper()
+    translations = {
+        'ВТС': 'BTC', 'БИТКОИН': 'BTC', 'БИТКОЙН': 'BTC',
+        'ЕТН': 'ETH', 'ЭФИР': 'ETH', 'ЭФИРИУМ': 'ETH', 
+        'СОЛ': 'SOL', 'СОЛАНА': 'SOL',
+        'РИПЛ': 'XRP', 'ДОГЕ': 'DOGE'
+    }
+    if name in translations:
+        name = translations[name]
+        
+    if "ЗОЛОТ" in name or "GOLD" in name:
+        return 'GOLD', 'metal', 'physical'
+    elif "СЛАВЯНКА" in name or "МОНЕТ" in name:
+        return 'СЛАВЯНКА', 'coin', 'physical'
+    elif len(name) <= 5 and name not in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'USDT']:
+        return name, 'stock', 'exchange'
+    else:
+        return name, 'crypto', 'exchange'
+
 # --- БОТ ---
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -152,7 +171,6 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         "🤖 Привет! Я твой портфельный менеджер.\n\n"
-        "Я умею усреднять активы и удалять их при продаже.\n\n"
         "Примеры команд:\n"
         "• <code>Баланс на бирже 2000</code>\n"
         "• <code>Купил 0,001 ВТС по 78000</code>\n"
@@ -179,7 +197,7 @@ async def handle_callbacks(callback: CallbackQuery):
 async def handle_text(message: types.Message):
     text = message.text.strip().lower().replace(',', '.')
     
-    # 1. Установка баланса
+    # 1. Баланс
     balance_match = re.search(r'(?:баланс\s+на\s+бирже|на\s+бирже)\s+([\d.]+)', text)
     if balance_match:
         amount = float(balance_match.group(1))
@@ -187,7 +205,7 @@ async def handle_text(message: types.Message):
         await message.answer(f"✅ Баланс биржи установлен: <b>{amount:,.2f} USD</b>", parse_mode="HTML")
         return
 
-    # 2. Поиск "Продал ... по ..."
+    # 2. Продажа
     sell_match = re.search(r'продал\s+(.+?)\s+по\s+([\d.]+)', text, re.IGNORECASE)
     if sell_match:
         part1 = sell_match.group(1)
@@ -195,16 +213,12 @@ async def handle_text(message: types.Message):
         
         numbers = re.findall(r'[\d.]+', part1)
         if not numbers:
-            await message.answer("Не нашел количество. Пример: «Продал 0,001 ВТС по 79000»")
+            await message.answer("Не нашел количество.")
             return
         amount = float(numbers[0])
         
-        asset_name = re.sub(r'[\d.]+', '', part1).strip().upper()
-        
-        # Перевод названий
-        translations = {'ВТС': 'BTC', 'ЕТН': 'ETH', 'ЭФИР': 'ETH', 'СОЛ': 'SOL', 'СОЛАНА': 'SOL'}
-        if asset_name in translations:
-            asset_name = translations[asset_name]
+        raw_name = re.sub(r'[\d.]+', '', part1).strip()
+        asset_name, _, _ = parse_asset_name(raw_name)
             
         result = sell_asset(asset_name, amount)
         
@@ -215,10 +229,10 @@ async def handle_text(message: types.Message):
         elif result == "all_sold":
             await message.answer(f"✅ Продано всё: <b>{amount} {asset_name}</b> по цене {sell_price}. Позиция закрыта.", parse_mode="HTML")
         else:
-            await message.answer(f"✅ Продано: <b>{amount} {asset_name}</b> по цене {sell_price}. Остаток в портфеле уменьшен.", parse_mode="HTML")
+            await message.answer(f"✅ Продано: <b>{amount} {asset_name}</b> по цене {sell_price}. Остаток уменьшен.", parse_mode="HTML")
         return
 
-    # 3. Поиск "Купил ... по ..."
+    # 3. Покупка
     match = re.search(r'купил\s+(.+?)\s+по\s+([\d.]+)', text, re.IGNORECASE)
     if match:
         part1 = match.group(1) 
@@ -226,34 +240,12 @@ async def handle_text(message: types.Message):
         
         numbers = re.findall(r'[\d.]+', part1)
         if not numbers:
-            await message.answer("Не нашел количество. Пример: «Купил 0,001 ВТС по 75000»")
+            await message.answer("Не нашел количество.")
             return
         amount = float(numbers[0])
         
-        asset_name = re.sub(r'[\d.]+', '', part1).strip().upper()
-        
-        # Перевод названий
-        translations = {
-            'ВТС': 'BTC', 'БИТКОИН': 'BTC', 'БИТКОЙН': 'BTC',
-            'ЕТН': 'ETH', 'ЭФИР': 'ETH', 'ЭФИРИУМ': 'ETH', 
-            'СОЛ': 'SOL', 'СОЛАНА': 'SOL'
-        }
-        if asset_name in translations:
-            asset_name = translations[asset_name]
-            
-        asset_type = 'crypto'
-        location = 'exchange'
-        
-        if "ЗОЛОТ" in asset_name or "GOLD" in asset_name:
-            asset_name = 'GOLD'
-            asset_type = 'metal'
-            location = 'physical'
-        elif "СЛАВЯНКА" in asset_name or "МОНЕТ" in asset_name:
-            asset_name = 'СЛАВЯНКА'
-            asset_type = 'coin'
-            location = 'physical'
-        elif len(asset_name) <= 5 and asset_name not in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'USDT']:
-            asset_type = 'stock'
+        raw_name = re.sub(r'[\d.]+', '', part1).strip()
+        asset_name, asset_type, location = parse_asset_name(raw_name)
             
         add_asset(asset_name, amount, buy_price, asset_type, location)
         await message.answer(f"✅ Добавлено/усреднено: <b>{asset_name}</b>. Цена покупки: <b>{buy_price}</b>.", parse_mode="HTML")
@@ -324,7 +316,6 @@ async def show_portfolio(message: types.Message):
     if not has_exchange_assets: text_exchange += "   (Пусто)\n"
     if not has_physical_assets: text_physical += "   (Пусто)\n"
     
-    # Расчет свободного кэша
     free_cash = total_exchange_balance - exchange_assets_value
     if free_cash < 0:
         free_cash_text = "0.00 USD (все средства в активах)"
