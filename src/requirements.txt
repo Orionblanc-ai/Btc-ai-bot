@@ -4,4 +4,4 @@ aiohttp
 apscheduler
 ccxt
 pytz
-pandas
+yfinance
