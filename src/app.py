@@ -174,8 +174,8 @@ async def cmd_start(message: types.Message):
         "Примеры команд:\n"
         "• <code>Баланс на бирже 2000</code>\n"
         "• <code>Купил 0,001 ВТС по 78000</code>\n"
-        "• <code>Продал 0,0005 ВТС по 79000</code>\n"
-        "• <code>Купил 1 грамм золота по 80</code>",
+        "• <code>Купил 2 грамма золота за 200</code>\n"
+        "• <code>Продал 0,0005 ВТС за 79000</code>",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -186,7 +186,7 @@ async def handle_callbacks(callback: CallbackQuery):
         await show_portfolio(callback.message)
         await callback.answer()
     elif callback.data == "help_add":
-        await callback.message.answer("Пиши: «Баланс на бирже 2000», «Купил 0,1 ВТС по 75000» или «Продал 0,05 ВТС по 80000».")
+        await callback.message.answer("Пиши: «Баланс на бирже 2000», «Купил 0,1 ВТС по 75000» или «Купил 2 грамма золота за 200».")
         await callback.answer()
     elif callback.data == "clear_db":
         clear_db()
@@ -205,15 +205,15 @@ async def handle_text(message: types.Message):
         await message.answer(f"✅ Баланс биржи установлен: <b>{amount:,.2f} USD</b>", parse_mode="HTML")
         return
 
-    # 2. Продажа
-    sell_match = re.search(r'продал\s+(.+?)\s+по\s+([\d.]+)', text, re.IGNORECASE)
+    # 2. Продажа (ищем "продал", "по" или "за")
+    sell_match = re.search(r'продал\s+(.+?)\s+(?:по|за)\s+([\d.]+)', text, re.IGNORECASE)
     if sell_match:
         part1 = sell_match.group(1)
         sell_price = float(sell_match.group(2))
         
         numbers = re.findall(r'[\d.]+', part1)
         if not numbers:
-            await message.answer("Не нашел количество.")
+            await message.answer("Я вижу, что ты хочешь продать, но не нашел количество. Напиши, например: «Продал 0,001 ВТС за 79000»")
             return
         amount = float(numbers[0])
         
@@ -232,15 +232,15 @@ async def handle_text(message: types.Message):
             await message.answer(f"✅ Продано: <b>{amount} {asset_name}</b> по цене {sell_price}. Остаток уменьшен.", parse_mode="HTML")
         return
 
-    # 3. Покупка
-    match = re.search(r'купил\s+(.+?)\s+по\s+([\d.]+)', text, re.IGNORECASE)
+    # 3. Покупка (ищем "купил", "по" или "за")
+    match = re.search(r'купил\s+(.+?)\s+(?:по|за)\s+([\d.]+)', text, re.IGNORECASE)
     if match:
         part1 = match.group(1) 
         buy_price = float(match.group(2))
         
         numbers = re.findall(r'[\d.]+', part1)
         if not numbers:
-            await message.answer("Не нашел количество.")
+            await message.answer("Я вижу, что ты хочешь купить, но не нашел количество. Напиши, например: «Купил 2 грамма золота за 200»")
             return
         amount = float(numbers[0])
         
@@ -255,7 +255,12 @@ async def handle_text(message: types.Message):
         await show_portfolio(message)
         return
         
-    await message.answer("Я не понял. Пример: «Купил 0,001 ВТС по 75000» или «Продал 0,0005 ВТС по 80000».")
+    # Если бот увидел "купил" или "продал", но не понял формат
+    if "купил" in text or "продал" in text:
+        await message.answer("Я не совсем понял. Напиши в формате: «Купил 2 грамма золота за 200» или «Продал 0,001 ВТС по 79000»")
+        return
+
+    await message.answer("Я не понял. Пример: «Купил 0,001 ВТС по 75000» или «Баланс на бирже 2000».")
 
 async def show_portfolio(message: types.Message):
     portfolio = get_portfolio()
