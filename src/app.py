@@ -139,7 +139,7 @@ async def handle_callbacks(callback: CallbackQuery):
 
 @dp.message()
 async def handle_text(message: types.Message):
-    text = message.text.strip().lower().replace(',', '.') # Заменяем запятые на точки
+    text = message.text.strip().lower().replace(',', '.')
     
     # 1. Установка баланса
     balance_match = re.search(r'(?:баланс\s+на\s+бирже|на\s+бирже)\s+([\d.]+)', text)
@@ -149,27 +149,24 @@ async def handle_text(message: types.Message):
         await message.answer(f"✅ Баланс биржи установлен: <b>{amount:,.2f} USD</b>", parse_mode="HTML")
         return
 
-    # 2. Умный поиск актива (ищем все числа и слова)
-    # Паттерн: "купил", затем любые слова/числа, "по", затем число
+    # 2. Умный поиск актива
     match = re.search(r'купил\s+(.+?)\s+по\s+([\d.]+)', text, re.IGNORECASE)
     if match:
-        part1 = match.group(1) # То, что до "по" (например: "btc 0.001" или "25 spce")
+        part1 = match.group(1)
         buy_price = float(match.group(2))
         
-        # Ищем числа в part1
         numbers = re.findall(r'[\d.]+', part1)
         if not numbers:
             await message.answer("Не нашел количество. Пример: «Купил 0,001 BTC по 75000»")
             return
         amount = float(numbers[0])
         
-        # Ищем название актива (убираем числа из строки)
         asset_name = re.sub(r'[\d.]+', '', part1).strip().upper()
         if not asset_name: asset_name = "UNKNOWN"
         
-        # Распределяем типы
+        # --- ЛОГИКА РАСПРЕДЕЛЕНИЯ ---
         asset_type = 'crypto'
-        location = 'exchange'
+        location = 'exchange' # По умолчанию всё идет на биржу
         
         if "ЗОЛОТ" in asset_name or "GOLD" in asset_name:
             asset_name = 'GOLD'
@@ -179,7 +176,8 @@ async def handle_text(message: types.Message):
             asset_name = 'СЛАВЯНКА'
             asset_type = 'coin'
             location = 'physical'
-        elif len(asset_name) <= 5 and not asset_name in ['BTC', 'ETH', 'SOL', 'XRP', 'USDT']: 
+        elif asset_name in ['SPCE', 'AAPL', 'TSLA', 'NVDA', 'KO', 'MSFT', 'GOOG']: 
+            # Список известных акций (можно расширять)
             asset_type = 'stock'
             
         add_asset(asset_name, amount, buy_price, asset_type, location)
