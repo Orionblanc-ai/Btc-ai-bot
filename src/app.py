@@ -155,15 +155,22 @@ def parse_asset_name(raw_name):
     else:
         return name, 'crypto', 'exchange'
 
-# --- ФУНКЦИЯ ОЧИСТКИ ЧИСЕЛ (Убирает пробелы и точки-разделители) ---
+# --- ФУНКЦИЯ ОЧИСТКИ ЧИСЕЛ (Исправленная) ---
 def clean_number(val_str):
-    # Убираем пробелы
     val_str = val_str.replace(' ', '')
-    # Если есть точка и после неё ровно 3 цифры (например, 20.000), это тысячный разделитель
+    
+    # Если в строке есть запятая, считаем её дробным разделителем (например, 0,001)
+    if ',' in val_str:
+        val_str = val_str.replace('.', '').replace(',', '.')
+        return float(val_str)
+    
+    # Если запятой нет, но есть точка
     if '.' in val_str:
         parts = val_str.split('.')
+        # Если точка одна и после неё три нуля (или три цифры), это тысячи
         if len(parts) == 2 and len(parts[1]) == 3:
-            val_str = parts[0] + parts[1] # Склеиваем: 20000
+            val_str = parts[0] + parts[1]
+            
     return float(val_str)
 
 # --- БОТ ---
