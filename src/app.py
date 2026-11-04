@@ -19,7 +19,6 @@ CHAT_ID = None
 exchange = ccxt.kraken()
 MINSK_TZ = pytz.timezone('Europe/Minsk')
 
-# Глобальная переменная для ожидания ответа о цене Славянки
 waiting_for_slav_price = False
 
 # --- БАЗА ДАННЫХ ---
@@ -143,7 +142,7 @@ def clear_db():
 
 init_db()
 
-# --- ПЛАН ИЗ ВАШЕЙ ТАБЛИЦЫ ---
+# --- ПЛАН ---
 PLAN_DATA = {
     (2026, 11): 2393.38, (2026, 12): 2642.98, (2027, 1): 2907.56, (2027, 2): 3188.01, (2027, 3): 3485.29, (2027, 4): 3800.41, (2027, 5): 4134.43, (2027, 6): 4488.50, (2027, 7): 4863.81, (2027, 8): 5261.64, (2027, 9): 5683.34, (2027, 10): 6130.34, (2027, 11): 6604.16, (2027, 12): 7106.41, (2028, 1): 7638.79, (2028, 2): 8203.12, (2028, 3): 8801.31, (2028, 4): 9435.39, (2028, 5): 10107.51, (2028, 6): 10819.96, (2028, 7): 11575.16, (2028, 8): 12375.67, (2028, 9): 13224.21, (2028, 10): 14123.66, (2028, 11): 15077.08, (2028, 12): 16087.70, (2029, 1): 17158.97, (2029, 2): 18294.50, (2029, 3): 19498.17, (2029, 4): 20774.06, (2029, 5): 22126.51, (2029, 6): 23560.10, (2029, 7): 25079.70, (2029, 8): 26690.49, (2029, 9): 28397.92, (2029, 10): 30207.79, (2029, 11): 32126.26, (2029, 12): 34159.83, (2030, 1): 36315.42, (2030, 2): 38600.35, (2030, 3): 41022.37, (2030, 4): 43589.71, (2030, 5): 46311.09, (2030, 6): 49195.76, (2030, 7): 52253.51, (2030, 8): 55494.72, (2030, 9): 58930.40, (2030, 10): 62572.22, (2030, 11): 66432.56, (2030, 12): 68528.53
 }
@@ -152,7 +151,7 @@ TOTAL_GOAL = 100000.0
 def get_plan_for_month(year, month):
     return PLAN_DATA.get((year, month), 0.0)
 
-# --- ПОЛУЧЕНИЕ ЦЕН ---
+# --- ЦЕНЫ ---
 def get_crypto_price(symbol):
     try:
         ticker = exchange.fetch_ticker(symbol)
@@ -211,8 +210,9 @@ async def cmd_start(message: types.Message):
         "🤖 Привет! Я твой портфельный менеджер.\n\n"
         "Примеры команд:\n"
         "• <code>Баланс на бирже 1880</code>\n"
-        "• <code>Купил 0,001 ВТС по 78 000</code>\n"
-        "• <code>Купил 4 грамма золота за 700</code>\n"
+        "• <code>Купил 0,001 ВТС по 78 000</code> (цена за 1 шт)\n"
+        "• <code>Купил 0,0055 ВТС за 437</code> (общая сумма)\n"
+        "• <code>Купил 4 грамма золота за 700</code> (общая сумма)\n"
         "• <code>Купил 3 славянки за 450</code>",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
@@ -239,18 +239,16 @@ async def handle_text(message: types.Message):
     global waiting_for_slav_price
     text = message.text.strip().lower()
     
-    # Если бот ждет цену Славянки
     if waiting_for_slav_price:
         try:
             price = clean_number(text)
             set_setting('slavyanka_price', price)
             waiting_for_slav_price = False
-            await message.answer(f"✅ Цена выкупа Славянки сохранена: <b>{price:,.2f} USD</b>. Теперь я буду считать её стоимость по этой цене.", parse_mode="HTML")
+            await message.answer(f"✅ Цена выкупа Славянки сохранена: <b>{price:,.2f} USD</b>", parse_mode="HTML")
         except:
             await message.answer("Пожалуйста, напиши просто число (например: 150).")
         return
 
-    # 1. Баланс биржи
     balance_match = re.search(r'(?:баланс\s+биржи|баланс\s+на\s+бирже|на\s+бирже)\s+([\d\s.,]+)', text)
     if balance_match:
         try:
@@ -260,7 +258,6 @@ async def handle_text(message: types.Message):
         except: await message.answer("Не смог распознать сумму.")
         return
 
-    # 2. Продажа
     sell_match = re.search(r'продал\s+(.+?)\s+(?:по|за)\s+([\d\s.,]+)', text, re.IGNORECASE)
     if sell_match:
         part1 = sell_match.group(1)
@@ -280,12 +277,13 @@ async def handle_text(message: types.Message):
         except: pass
         return
 
-    # 3. Покупка
-    match = re.search(r'купил\s+(.+?)\s+(?:по|за)\s+([\d\s.,]+)', text, re.IGNORECASE)
+    # Поиск покупки. Ищем, какой предлог использован: "по" или "за"
+    match = re.search(r'купил\s+(.+?)\s+(по|за)\s+([\d\s.,]+)', text, re.IGNORECASE)
     if match:
         part1 = match.group(1) 
+        prep = match.group(2).lower()
         try:
-            total_cost = clean_number(match.group(2))
+            val = clean_number(match.group(3))
             numbers = re.findall(r'[\d\s.,]+', part1)
             if not numbers: return
             amount = clean_number(numbers[0])
@@ -293,10 +291,12 @@ async def handle_text(message: types.Message):
             raw_name = re.sub(r'[\d\s.,]+', '', part1).strip()
             asset_name, asset_type, location = parse_asset_name(raw_name)
             
-            if location == 'physical':
-                unit_price = total_cost / amount
+            # Логика: если "за" или физический актив -> val это общая сумма. 
+            # Если "по" и это крипта -> val это цена за 1 шт.
+            if prep == "за" or location == 'physical':
+                unit_price = val / amount
             else:
-                unit_price = total_cost
+                unit_price = val
                 
             add_asset(asset_name, amount, unit_price, asset_type, location)
             
