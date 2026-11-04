@@ -345,7 +345,6 @@ async def show_portfolio(message: types.Message):
             current_total = amount * current_price
             profit = current_total - (amount * avg_buy_price)
             sign = "🟢" if profit >= 0 else "🔴"
-            # Убрали "ед." и "среди покупка", сделали компактно
             line = f"🔸 <b>{asset}</b>: {amount}\n   Вход: {int(avg_buy_price)}$ | Тек: {int(current_price)}$ ({sign} {int(profit):+}$)\n"
             if location == 'exchange':
                 text_exchange += line
@@ -361,18 +360,12 @@ async def show_portfolio(message: types.Message):
     
     total_capital = total_exchange_balance + physical_value
     
-    # Прогресс-бар до цели
-    progress = total_capital / TOTAL_GOAL
-    bar_length = 10
-    filled = int(progress * bar_length)
-    bar = "█" * filled + "░" * (bar_length - filled)
-    
+    # Убрал прогресс-бар из портфеля, как вы и просили
     final_text = f"📊 <b>Твой портфель:</b>\n\n"
     final_text += f"🏦 На бирже: <b>{int(total_exchange_balance):,} USD</b>\n"
     final_text += f"{text_exchange}\n"
     final_text += f"{text_physical}\n"
-    final_text += f"💰 <b>ОБЩИЙ КАПИТАЛ: {int(total_capital):,} USD</b>\n"
-    final_text += f"📈 Прогресс: [{bar}] {progress*100:.0f}%"
+    final_text += f"💰 <b>ОБЩИЙ КАПИТАЛ: {int(total_capital):,} USD</b>"
     
     await message.answer(final_text, parse_mode="HTML")
 
@@ -411,6 +404,12 @@ async def show_plan_fact(message: types.Message):
     
     today_str = now.strftime("%d.%m.%Y")
     
+    # Прогресс-бар добавлен в План-Факт
+    progress = fact_total / TOTAL_GOAL
+    bar_length = 10
+    filled = int(progress * bar_length)
+    bar = "█" * filled + "░" * (bar_length - filled)
+    
     text = (
         f"🎯 <b>План-Факт на {today_str}</b>\n\n"
         f"🏦 <b>Биржа:</b>\n"
@@ -422,7 +421,8 @@ async def show_plan_fact(message: types.Message):
         f"   План: {int(plan_total_linear):,} USD\n"
         f"   PnL: <b>{int(diff_total):+} USD</b> {sign_total}\n\n"
         f"🏆 <b>Цель:</b> {int(TOTAL_GOAL):,} USD\n"
-        f"   Осталось: <b>{int(remaining_to_goal):,} USD</b>"
+        f"   Осталось: <b>{int(remaining_to_goal):,} USD</b>\n"
+        f"📈 Прогресс: [{bar}] {progress*100:.0f}%"
     )
     await message.answer(text, parse_mode="HTML")
 
