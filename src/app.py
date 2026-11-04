@@ -48,7 +48,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-def add_asset(asset, amount, buy_price, asset_type, location="exchange"):
+def add_asset(asset, amount, buy_price, asset_type, location):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     cursor.execute('SELECT id, amount, avg_buy_price FROM portfolio WHERE asset = ?', (asset,))
@@ -158,26 +158,24 @@ def get_crypto_price(symbol):
 
 def get_gold_price_usd():
     try:
-        # Берем цену золота с Yahoo Finance (фьючерс GC=F)
         ticker = yf.Ticker("GC=F")
         hist = ticker.history(period="1d")
         if not hist.empty:
             price_per_ounce = float(hist['Close'].iloc[-1])
             price_per_gram = price_per_ounce / 31.1035
-            spread = get_setting('gold_spread', 5.0) # Наценка по умолчанию 5%
+            spread = get_setting('gold_spread', 5.0)
             return price_per_gram * (1 + spread / 100)
     except: pass
     return get_setting('gold_last_price', 0.0)
 
 def get_silver_price_usd():
     try:
-        # Берем цену серебра с Yahoo Finance (фьючерс SI=F)
         ticker = yf.Ticker("SI=F")
         hist = ticker.history(period="1d")
         if not hist.empty:
             price_per_ounce = float(hist['Close'].iloc[-1])
             price_per_gram = price_per_ounce / 31.1035
-            spread = get_setting('silver_spread', 30.0) # Наценка по умолчанию 30%
+            spread = get_setting('silver_spread', 30.0)
             return price_per_gram * (1 + spread / 100)
     except: pass
     return get_setting('silver_last_price', 0.0)
@@ -222,10 +220,9 @@ async def cmd_start(message: types.Message):
     await message.answer(
         "🤖 Привет! Я твой портфельный менеджер.\n\n"
         "Примеры команд:\n"
-        "• <code>Баланс на бирже 1880</code>\n"
+        "• <code>На бирже 1992</code> (общая сумма)\n"
         "• <code>Купил 0,001 ВТС по 78 000</code>\n"
-        "• <code>Купил 4 грамма золота за 700</code>\n"
-        "• <code>Купил 3 славянки за 450</code>",
+        "• <code>Купил 4 грамма золота за 700</code>",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -239,7 +236,7 @@ async def handle_callbacks(callback: CallbackQuery):
         await show_plan_fact(callback.message)
         await callback.answer()
     elif callback.data == "help_add":
-        await callback.message.answer("Пиши: «Баланс на бирже 1880», «Купил 0,1 ВТС по 75000» или «Купил 4 грамма золота за 700».")
+        await callback.message.answer("Пиши: «На бирже 1992», «Купил 0,1 ВТС по 75000» или «Купил 4 грамма золота за 700».")
         await callback.answer()
     elif callback.data == "clear_db":
         clear_db()
@@ -294,7 +291,6 @@ async def handle_text(message: types.Message):
             raw_name = re.sub(r'[\d\s.,]+', '', part1).strip()
             asset_name, asset_type, location = parse_asset_name(raw_name)
             
-            # Если предлог "за" или актив физический -> val это общая сумма
             if prep == "за" or location == 'physical':
                 unit_price = val / amount
             else:
@@ -312,8 +308,9 @@ async def handle_text(message: types.Message):
 async def show_portfolio(message: types.Message):
     portfolio = get_portfolio()
     total_exchange_balance = get_exchange_balance()
+    
     if not portfolio and total_exchange_balance == 0:
-        await message.answer("Портфель пуст. Начни с: «Баланс на бирже 1880»")
+        await message.answer("Портфель пуст. Начни с: «На бирже 1992»")
         return
         
     gold_price = get_gold_price_usd()
@@ -349,29 +346,18 @@ async def show_portfolio(message: types.Message):
                 text_physical += line
                 physical_value += current_total
                 has_physical = True
-        else:
-            # Если цену не удалось получить, выводим хотя бы затраты
-            line = f"🔸 <b>{asset}</b>: {amount} ед. (Цена не получена)\n"
-            if location == 'exchange':
-                text_exchange += line
-                has_exchange = True
-            else:
-                text_physical += line
-                has_physical = True
 
     if not has_exchange: text_exchange += "   (Пусто)\n"
     if not has_physical: text_physical += "   (Пусто)\n"
     
-    free_cash = total_exchange_balance - exchange_assets_value
-    free_cash_text = "0.00 USD" if free_cash < 0 else f"{free_cash:,.2f} USD"
     total_capital = total_exchange_balance + physical_value
     
-    final_text = f"📊 <b>Твой портфель:</b>\n\n{text_exchange}"
-    final_text += f"   📈 Активов на бирже: {exchange_assets_value:,.2f} USD\n"
-    final_text += f"   💵 Свободный кэш: {free_cash_text}\n"
-    final_text += f"   🏦 Всего на бирже (с кэшем): {total_exchange_balance:,.2f} USD\n\n{text_physical}"
-    final_text += f"   📈 Физика: {physical_value:,.2f} USD\n\n"
-    final_text += f"💰 <b>ОБЩИЙ КАПИТАЛ: {total_capital:,.2f} USD</b>"
+    final_text = f"📊 <b>Твой портфель:</b>\n\n"
+    final_text += f"🏦 <b>На бирже (общая сумма): {total_exchange_balance:,.2f} USD</b>\n"
+    final_text += f"{text_exchange}\n"
+    final_text += f"🏠 <b>Физические активы:</b>\n{text_physical}\n"
+    final_text += f"💰 <b>ОБЩИЙ КАПИТАЛ (Биржа + Физика): {total_capital:,.2f} USD</b>"
+    
     await message.answer(final_text, parse_mode="HTML")
 
 async def show_plan_fact(message: types.Message):
@@ -407,11 +393,13 @@ async def show_plan_fact(message: types.Message):
     
     text = (
         f"🎯 <b>План-Факт на {today_str}</b>\n\n"
-        f"🏦 <b>Биржа (план на месяц):</b> {plan_exchange:,.2f} USD\n"
-        f"   Факт по бирже: {total_exchange_balance:,.2f} USD\n"
-        f"   Отклонение: <b>{diff_exchange:+,.2f} USD</b> {sign_ex}\n\n"
-        f"💰 <b>Общая цель:</b> {TOTAL_GOAL:,.2f} USD\n"
-        f"   Общий факт: {fact_total:,.2f} USD\n"
+        f"🏦 <b>Биржа:</b>\n"
+        f"   Факт: {total_exchange_balance:,.2f} USD\n"
+        f"   План на месяц: {plan_exchange:,.2f} USD\n"
+        f"   PnL: <b>{diff_exchange:+,.2f} USD</b> {sign_ex}\n\n"
+        f"💰 <b>Общий капитал (Биржа + Физика):</b>\n"
+        f"   Факт: {fact_total:,.2f} USD\n"
+        f"   Цель: {TOTAL_GOAL:,.2f} USD\n"
         f"   Осталось накопить: <b>{remaining_to_goal:,.2f} USD</b>"
     )
     await message.answer(text, parse_mode="HTML")
