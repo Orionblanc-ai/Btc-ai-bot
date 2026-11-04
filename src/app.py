@@ -146,8 +146,20 @@ PLAN_DATA = {
 }
 TOTAL_GOAL = 100000.0
 
+START_DATE = datetime(2026, 11, 1)
+END_DATE = datetime(2030, 12, 31)
+TOTAL_DAYS = (END_DATE - START_DATE).days
+DAILY_GROWTH = TOTAL_GOAL / TOTAL_DAYS
+
 def get_plan_for_month(year, month):
     return PLAN_DATA.get((year, month), 0.0)
+
+def get_expected_total_goal():
+    now = datetime.now(MINSK_TZ).replace(tzinfo=None)
+    if now < START_DATE: return 0.0
+    if now > END_DATE: return TOTAL_GOAL
+    days_passed = (now - START_DATE).days
+    return days_passed * DAILY_GROWTH
 
 # --- ЦЕНЫ ---
 def get_crypto_price(symbol):
@@ -220,7 +232,7 @@ async def cmd_start(message: types.Message):
     await message.answer(
         "🤖 Привет! Я твой портфельный менеджер.\n\n"
         "Примеры команд:\n"
-        "• <code>На бирже 1992</code> (общая сумма)\n"
+        "• <code>На бирже 2000</code>\n"
         "• <code>Купил 0,001 ВТС по 78 000</code>\n"
         "• <code>Купил 4 грамма золота за 700</code>",
         reply_markup=builder.as_markup(),
@@ -236,7 +248,7 @@ async def handle_callbacks(callback: CallbackQuery):
         await show_plan_fact(callback.message)
         await callback.answer()
     elif callback.data == "help_add":
-        await callback.message.answer("Пиши: «На бирже 1992», «Купил 0,1 ВТС по 75000» или «Купил 4 грамма золота за 700».")
+        await callback.message.answer("Пиши: «На бирже 2000», «Купил 0,1 ВТС по 75000» или «Купил 4 грамма золота за 700».")
         await callback.answer()
     elif callback.data == "clear_db":
         clear_db()
@@ -247,17 +259,15 @@ async def handle_callbacks(callback: CallbackQuery):
 async def handle_text(message: types.Message):
     text = message.text.strip().lower()
     
-    # 1. Баланс биржи
     balance_match = re.search(r'(?:баланс\s+биржи|баланс\s+на\s+бирже|на\s+бирже)\s+([\d\s.,]+)', text)
     if balance_match:
         try:
             amount = clean_number(balance_match.group(1))
             set_exchange_balance(amount)
-            await message.answer(f"✅ Общая сумма на бирже установлена: <b>{amount:,.2f} USD</b>", parse_mode="HTML")
+            await message.answer(f"✅ Общая сумма на бирже установлена: <b>{int(amount):,} USD</b>", parse_mode="HTML")
         except: await message.answer("Не смог распознать сумму.")
         return
 
-    # 2. Продажа
     sell_match = re.search(r'продал\s+(.+?)\s+(?:по|за)\s+([\d\s.,]+)', text, re.IGNORECASE)
     if sell_match:
         part1 = sell_match.group(1)
@@ -277,7 +287,6 @@ async def handle_text(message: types.Message):
         except: pass
         return
 
-    # 3. Покупка
     match = re.search(r'купил\s+(.+?)\s+(по|за)\s+([\d\s.,]+)', text, re.IGNORECASE)
     if match:
         part1 = match.group(1) 
@@ -297,7 +306,7 @@ async def handle_text(message: types.Message):
                 unit_price = val
                 
             add_asset(asset_name, amount, unit_price, asset_type, location)
-            await message.answer(f"✅ Добавлено: <b>{amount} {asset_name}</b>. Средняя цена за 1 ед.: <b>{unit_price:,.2f}$</b>", parse_mode="HTML")
+            await message.answer(f"✅ Добавлено: <b>{amount} {asset_name}</b>. Средняя цена за 1 ед.: <b>{int(unit_price)}$</b>", parse_mode="HTML")
         except: pass
         return
         
@@ -308,9 +317,8 @@ async def handle_text(message: types.Message):
 async def show_portfolio(message: types.Message):
     portfolio = get_portfolio()
     total_exchange_balance = get_exchange_balance()
-    
     if not portfolio and total_exchange_balance == 0:
-        await message.answer("Портфель пуст. Начни с: «На бирже 1992»")
+        await message.answer("Портфель пуст. Начни с: «На бирже 2000»")
         return
         
     gold_price = get_gold_price_usd()
@@ -337,7 +345,7 @@ async def show_portfolio(message: types.Message):
             current_total = amount * current_price
             profit = current_total - (amount * avg_buy_price)
             sign = "🟢" if profit >= 0 else "🔴"
-            line = f"🔸 <b>{asset}</b>: {amount} ед.\n   Среди. покупка: {avg_buy_price:,.2f} | Сейчас: {current_price:,.2f}\n   Стоимость: {current_total:,.2f} {sign} ({profit:+,.2f})\n"
+            line = f"🔸 <b>{asset}</b>: {amount} ед.\n   Среди. покупка: {int(avg_buy_price)} | Сейчас: {int(current_price)}\n   Стоимость: {int(current_total)} {sign} ({int(profit):+})\n"
             if location == 'exchange':
                 text_exchange += line
                 exchange_assets_value += current_total
@@ -353,10 +361,10 @@ async def show_portfolio(message: types.Message):
     total_capital = total_exchange_balance + physical_value
     
     final_text = f"📊 <b>Твой портфель:</b>\n\n"
-    final_text += f"🏦 <b>На бирже (общая сумма): {total_exchange_balance:,.2f} USD</b>\n"
+    final_text += f"🏦 <b>На бирже (общая сумма): {int(total_exchange_balance):,} USD</b>\n"
     final_text += f"{text_exchange}\n"
-    final_text += f"🏠 <b>Физические активы:</b>\n{text_physical}\n"
-    final_text += f"💰 <b>ОБЩИЙ КАПИТАЛ (Биржа + Физика): {total_capital:,.2f} USD</b>"
+    final_text += f"{text_physical}\n"
+    final_text += f"💰 <b>ОБЩИЙ КАПИТАЛ (Биржа + Физика): {int(total_capital):,} USD</b>"
     
     await message.answer(final_text, parse_mode="HTML")
 
@@ -386,6 +394,10 @@ async def show_plan_fact(message: types.Message):
     diff_exchange = total_exchange_balance - plan_exchange
     sign_ex = "🟢" if diff_exchange >= 0 else "🔴"
     
+    plan_total_linear = get_expected_total_goal()
+    diff_total = fact_total - plan_total_linear
+    sign_total = "🟢" if diff_total >= 0 else "🔴"
+    
     remaining_to_goal = TOTAL_GOAL - fact_total
     if remaining_to_goal < 0: remaining_to_goal = 0
     
@@ -394,13 +406,15 @@ async def show_plan_fact(message: types.Message):
     text = (
         f"🎯 <b>План-Факт на {today_str}</b>\n\n"
         f"🏦 <b>Биржа:</b>\n"
-        f"   Факт: {total_exchange_balance:,.2f} USD\n"
-        f"   План на месяц: {plan_exchange:,.2f} USD\n"
-        f"   PnL: <b>{diff_exchange:+,.2f} USD</b> {sign_ex}\n\n"
+        f"   Факт: {int(total_exchange_balance):,} USD\n"
+        f"   План на месяц: {int(plan_exchange):,} USD\n"
+        f"   PnL: <b>{int(diff_exchange):+} USD</b> {sign_ex}\n\n"
         f"💰 <b>Общий капитал (Биржа + Физика):</b>\n"
-        f"   Факт: {fact_total:,.2f} USD\n"
-        f"   Цель: {TOTAL_GOAL:,.2f} USD\n"
-        f"   Осталось накопить: <b>{remaining_to_goal:,.2f} USD</b>"
+        f"   Факт: {int(fact_total):,} USD\n"
+        f"   План на сегодня: {int(plan_total_linear):,} USD\n"
+        f"   PnL: <b>{int(diff_total):+} USD</b> {sign_total}\n\n"
+        f"🏆 <b>Цель:</b> {int(TOTAL_GOAL):,} USD\n"
+        f"   Осталось накопить: <b>{int(remaining_to_goal):,} USD</b>"
     )
     await message.answer(text, parse_mode="HTML")
 
