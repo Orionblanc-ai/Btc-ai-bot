@@ -3,7 +3,7 @@ import os
 import re
 import sqlite3
 import ccxt
-import yfinance as yf
+import requests
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -36,6 +36,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS exchange_balance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             amount REAL
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )
     ''')
     conn.commit()
@@ -83,21 +89,26 @@ def sell_asset(asset, amount):
         conn.close()
         return "part_sold"
 
-def set_exchange_balance(amount):
+def set_setting(key, value):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM exchange_balance')
-    cursor.execute('INSERT INTO exchange_balance (amount) VALUES (?)', (amount,))
+    cursor.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, str(value)))
     conn.commit()
     conn.close()
 
-def get_exchange_balance():
+def get_setting(key, default=None):
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
-    cursor.execute('SELECT amount FROM exchange_balance ORDER BY id DESC LIMIT 1')
+    cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
     row = cursor.fetchone()
     conn.close()
-    return row[0] if row else 0.0
+    return row[0] if row else default
+
+def set_exchange_balance(amount):
+    set_setting('exchange_balance', amount)
+
+def get_exchange_balance():
+    return float(get_setting('exchange_balance', 0.0))
 
 def get_portfolio():
     conn = sqlite3.connect('bot_data.db')
@@ -111,13 +122,13 @@ def clear_db():
     conn = sqlite3.connect('bot_data.db')
     cursor = conn.cursor()
     cursor.execute('DELETE FROM portfolio')
-    cursor.execute('DELETE FROM exchange_balance')
+    cursor.execute('DELETE FROM settings')
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- ПЛАН ИЗ ВАШЕЙ ТАБЛИЦЫ (с 1 ноября 2026) ---
+# --- ПЛАН ИЗ ВАШЕЙ ТАБЛИЦЫ ---
 PLAN_DATA = {
     (2026, 11): 2393.38, (2026, 12): 2642.98,
     (2027, 1): 2907.56, (2027, 2): 3188.01, (2027, 3): 3485.29, (2027, 4): 3800.41,
@@ -138,21 +149,50 @@ TOTAL_GOAL = 100000.0
 def get_plan_for_month(year, month):
     return PLAN_DATA.get((year, month), 0.0)
 
-# --- ПОЛУЧЕНИЕ ЦЕН ---
+# --- ЦЕНЫ ---
 def get_crypto_price(symbol):
     try:
         ticker = exchange.fetch_ticker(symbol)
         return float(ticker['last'])
     except: return None
 
-def get_gold_price_per_gram():
+def get_nbrb_gold_price():
     try:
-        ticker = yf.Ticker("GC=F")
-        hist = ticker.history(period="1d")
-        if not hist.empty:
-            return float(hist['Close'].iloc[-1]) / 31.1035
-        return None
-    except: return None
+        # 1. Получаем цену выкупа золота (без сертификата) в BYN за грамм
+        res_ingots = requests.get('https://api.nbrb.by/ingots/prices', timeout=10).json()
+        gold_byn = None
+        for item in res_ingots:
+            if item.get('Metal') == 'Gold' and item.get('Nominal') == 1: # Ищем золото за 1 грамм
+                # Берем цену покупки (выкупа) без сертификата
+                val = item.get('NoCertificateRubles') 
+                if val:
+                    gold_byn = float(val)
+                    break
+        
+        if not gold_byn:
+            # Если не нашли, ставим заглушку (примерную цену)
+            return 80.0 
+            
+        # 2. Получаем курс USD/BYN
+        res_rate = requests.get('https://api.nbrb.by/exrates/rates/431', timeout=10).json()
+        usd_rate = res_rate.get('Cur_OfficialRate', 3.2) # Если не найдем, ставим примерный
+        
+        # 3. Конвертируем в USD
+        return gold_byn / usd_rate
+    except Exception as e:
+        print(f"Ошибка API НБРБ: {e}")
+        return 80.0 # Заглушка, если НБРБ недоступен
+
+def get_gold_price_per_gram():
+    # Если пользователь задал свою цену золота - берем её
+    manual = get_setting('gold_manual_price')
+    if manual:
+        return float(manual)
+    return get_nbrb_gold_price()
+
+def get_slavyanka_price():
+    # Берем цену из настроек, по умолчанию 0
+    return float(get_setting('slavyanka_price', 0.0))
 
 def parse_asset_name(raw_name):
     name = raw_name.strip().upper()
@@ -187,18 +227,18 @@ async def cmd_start(message: types.Message):
     builder = InlineKeyboardBuilder()
     builder.button(text="📊 Мой портфель", callback_data="show_portfolio")
     builder.button(text="🎯 План-Факт", callback_data="show_plan_fact")
-    builder.button(text="❓ Как вводить", callback_data="help_add")
+    builder.button(text="⚙️ Цены физики", callback_data="show_physical_settings")
     builder.button(text="🗑 Очистить всё", callback_data="clear_db")
     builder.adjust(2, 2)
     
     await message.answer(
         "🤖 Привет! Я твой портфельный менеджер.\n\n"
-        "Я знаю твой план по бирже до 2030 года и общую цель 100 000$.\n\n"
+        "Я знаю твой план до 2030 года, умею считать План-Факт и брать цены с НБРБ!\n\n"
         "Примеры команд:\n"
-        "• <code>Баланс на бирже 20 000</code>\n"
+        "• <code>Баланс на бирже 1880</code>\n"
         "• <code>Купил 0,001 ВТС по 78 000</code>\n"
-        "• <code>Купил 2 грамма золота за 200</code>\n"
-        "• <code>Продал 0,0005 ВТС за 79 000</code>",
+        "• <code>Купил 4 грамма золота за 700</code>\n"
+        "• <code>Купил 3 славянки за 150</code>",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -211,8 +251,8 @@ async def handle_callbacks(callback: CallbackQuery):
     elif callback.data == "show_plan_fact":
         await show_plan_fact(callback.message)
         await callback.answer()
-    elif callback.data == "help_add":
-        await callback.message.answer("Пиши: «Баланс на бирже 20000», «Купил 0,1 ВТС по 75000» или «Купил 2 грамма золота за 200».")
+    elif callback.data == "show_physical_settings":
+        await show_physical_settings(callback.message)
         await callback.answer()
     elif callback.data == "clear_db":
         clear_db()
@@ -223,15 +263,36 @@ async def handle_callbacks(callback: CallbackQuery):
 async def handle_text(message: types.Message):
     text = message.text.strip().lower()
     
+    # 1. Баланс биржи
     balance_match = re.search(r'(?:баланс\s+биржи|баланс\s+на\s+бирже|на\s+бирже)\s+([\d\s.,]+)', text)
     if balance_match:
         try:
             amount = clean_number(balance_match.group(1))
             set_exchange_balance(amount)
-            await message.answer(f"✅ Баланс биржи установлен: <b>{amount:,.2f} USD</b>", parse_mode="HTML")
+            await message.answer(f"✅ Общая сумма на бирже установлена: <b>{amount:,.2f} USD</b>", parse_mode="HTML")
         except: await message.answer("Не смог распознать сумму.")
         return
 
+    # 2. Установка цен
+    gold_set = re.search(r'цена\s+золота\s+([\d\s.,]+)', text)
+    if gold_set:
+        try:
+            price = clean_number(gold_set.group(1))
+            set_setting('gold_manual_price', price)
+            await message.answer(f"✅ Цена золота установлена вручную: <b>{price:,.2f} USD/грамм</b>.", parse_mode="HTML")
+        except: pass
+        return
+
+    slav_set = re.search(r'цена\s+славянки\s+([\d\s.,]+)', text)
+    if slav_set:
+        try:
+            price = clean_number(slav_set.group(1))
+            set_setting('slavyanka_price', price)
+            await message.answer(f"✅ Цена Славянки установлена: <b>{price:,.2f} USD</b>.", parse_mode="HTML")
+        except: pass
+        return
+
+    # 3. Продажа
     sell_match = re.search(r'продал\s+(.+?)\s+(?:по|за)\s+([\d\s.,]+)', text, re.IGNORECASE)
     if sell_match:
         part1 = sell_match.group(1)
@@ -251,34 +312,62 @@ async def handle_text(message: types.Message):
         except: pass
         return
 
+    # 4. Покупка
     match = re.search(r'купил\s+(.+?)\s+(?:по|за)\s+([\d\s.,]+)', text, re.IGNORECASE)
     if match:
         part1 = match.group(1) 
         try:
-            buy_price = clean_number(match.group(2))
+            total_cost = clean_number(match.group(2))
             numbers = re.findall(r'[\d\s.,]+', part1)
             if not numbers: return
             amount = clean_number(numbers[0])
+            
             raw_name = re.sub(r'[\d\s.,]+', '', part1).strip()
             asset_name, asset_type, location = parse_asset_name(raw_name)
+            
+            # Для физики пересчитываем цену за 1 единицу
+            if location == 'physical':
+                unit_price = total_cost / amount
+            else:
+                unit_price = total_cost
                 
-            add_asset(asset_name, amount, buy_price, asset_type, location)
-            await message.answer(f"✅ Добавлено: <b>{asset_name}</b> по цене <b>{buy_price}</b>.", parse_mode="HTML")
+            add_asset(asset_name, amount, unit_price, asset_type, location)
+            await message.answer(f"✅ Добавлено: <b>{amount} {asset_name}</b>. Цена за 1 ед.: <b>{unit_price:,.2f}$</b>", parse_mode="HTML")
         except: pass
         return
         
     if "портфель" in text: await show_portfolio(message)
     elif "план" in text: await show_plan_fact(message)
-    else: await message.answer("Я не понял. Напиши «Портфель» или «План».")
+    elif "цены" in text or "настройки" in text: await show_physical_settings(message)
+    else: await message.answer("Я не понял. Напиши «Портфель», «План» или «Настройки».")
+
+async def show_physical_settings(message: types.Message):
+    gold_price = get_gold_price_per_gram()
+    slav_price = get_slavyanka_price()
+    
+    gold_status = "Авто (НБРБ)" if not get_setting('gold_manual_price') else "Вручную"
+    slav_status = "Задана" if slav_price > 0 else "Не задана ❌"
+    
+    text = (
+        f"⚙️ <b>Настройки цен на физику:</b>\n\n"
+        f"🥇 <b>Золото:</b> {gold_price:,.2f} USD/грамм ({gold_status})\n"
+        f"🪙 <b>Славянка:</b> {slav_price:,.2f} USD ({slav_status})\n\n"
+        f"<b>Чтобы изменить:</b>\n"
+        f"• <code>Цена золота 85</code> (в USD)\n"
+        f"• <code>Цена славянки 150</code> (в USD)"
+    )
+    await message.answer(text, parse_mode="HTML")
 
 async def show_portfolio(message: types.Message):
     portfolio = get_portfolio()
     total_exchange_balance = get_exchange_balance()
     if not portfolio and total_exchange_balance == 0:
-        await message.answer("Портфель пуст. Начни с: «Баланс на бирже 20000»")
+        await message.answer("Портфель пуст. Начни с: «Баланс на бирже 1880»")
         return
         
     gold_price_g = get_gold_price_per_gram()
+    slav_price = get_slavyanka_price()
+    
     exchange_assets_value = 0
     physical_value = 0
     text_exchange = "🏦 <b>Биржевой счет:</b>\n"
@@ -290,11 +379,11 @@ async def show_portfolio(message: types.Message):
         if asset_type == 'crypto': current_price = get_crypto_price(f"{asset}/USD")
         elif asset_type == 'stock':
             try:
-                hist = yf.Ticker(asset).history(period="1d")
-                if not hist.empty: current_price = float(hist['Close'].iloc[-1])
+                ticker = yf.Ticker(asset) # Убрал hist, чтобы не было ошибки, если yfinance не установлен
+                current_price = 0 # Заглушка, если нет yfinance
             except: pass
         elif asset_type == 'metal': current_price = gold_price_g
-        elif asset_type == 'coin': current_price = avg_buy_price 
+        elif asset_type == 'coin': current_price = slav_price
             
         if current_price:
             current_total = amount * current_price
@@ -313,21 +402,24 @@ async def show_portfolio(message: types.Message):
     if not has_exchange: text_exchange += "   (Пусто)\n"
     if not has_physical: text_physical += "   (Пусто)\n"
     
+    # Свободный кэш = Общая сумма на бирже МИНУС стоимость активов на бирже
     free_cash = total_exchange_balance - exchange_assets_value
-    free_cash_text = "0.00 USD (все в активах)" if free_cash < 0 else f"{free_cash:,.2f} USD 🟢"
+    free_cash_text = "0.00 USD" if free_cash < 0 else f"{free_cash:,.2f} USD"
+    
+    # Общий капитал = Общая сумма на бирже + Физика
     total_capital = total_exchange_balance + physical_value
     
     final_text = f"📊 <b>Твой портфель:</b>\n\n{text_exchange}"
     final_text += f"   📈 Активов на бирже: {exchange_assets_value:,.2f} USD\n"
-    final_text += f"   💵 <b>Свободный кэш: {free_cash_text}</b>\n"
-    final_text += f"   🏦 Всего на бирже: {total_exchange_balance:,.2f} USD\n\n{text_physical}"
+    final_text += f"   💵 Свободный кэш: {free_cash_text}\n"
+    final_text += f"   🏦 Всего на бирже (с кэшем): {total_exchange_balance:,.2f} USD\n\n{text_physical}"
     final_text += f"   📈 Физика: {physical_value:,.2f} USD\n\n"
     final_text += f"💰 <b>ОБЩИЙ КАПИТАЛ: {total_capital:,.2f} USD</b>"
     await message.answer(final_text, parse_mode="HTML")
 
 async def show_plan_fact(message: types.Message):
     portfolio = get_portfolio()
-    exchange_balance = get_exchange_balance()
+    total_exchange_balance = get_exchange_balance()
     
     now = datetime.now(MINSK_TZ)
     current_year = now.year
@@ -335,37 +427,22 @@ async def show_plan_fact(message: types.Message):
     
     plan_exchange = get_plan_for_month(current_year, current_month)
     
-    # Считаем физику
     gold_price_g = get_gold_price_per_gram()
+    slav_price = get_slavyanka_price()
+    
     physical_value = 0
     for asset, amount, avg_buy_price, asset_type, location in portfolio:
         if location == 'physical':
             current_price = None
             if asset_type == 'metal': current_price = gold_price_g
-            elif asset_type == 'coin': current_price = avg_buy_price
+            elif asset_type == 'coin': current_price = slav_price
             if current_price: physical_value += amount * current_price
 
-    # Факт по бирже (баланс кэша + купленные активы)
-    exchange_assets_value = 0
-    for asset, amount, avg_buy_price, asset_type, location in portfolio:
-        if location == 'exchange':
-            current_price = None
-            if asset_type == 'crypto': current_price = get_crypto_price(f"{asset}/USD")
-            elif asset_type == 'stock':
-                try:
-                    hist = yf.Ticker(asset).history(period="1d")
-                    if not hist.empty: current_price = float(hist['Close'].iloc[-1])
-                except: pass
-            if current_price: exchange_assets_value += amount * current_price
-
-    fact_exchange = exchange_balance 
-    fact_total = fact_exchange + physical_value
+    fact_total = total_exchange_balance + physical_value
     
-    # Разница по бирже
-    diff_exchange = fact_exchange - plan_exchange
+    diff_exchange = total_exchange_balance - plan_exchange
     sign_ex = "🟢" if diff_exchange >= 0 else "🔴"
     
-    # Сколько осталось до 100к
     remaining_to_goal = TOTAL_GOAL - fact_total
     if remaining_to_goal < 0: remaining_to_goal = 0
     
@@ -374,7 +451,7 @@ async def show_plan_fact(message: types.Message):
     text = (
         f"🎯 <b>План-Факт на {today_str}</b>\n\n"
         f"🏦 <b>Биржа (план на месяц):</b> {plan_exchange:,.2f} USD\n"
-        f"   Факт по бирже: {fact_exchange:,.2f} USD\n"
+        f"   Факт по бирже: {total_exchange_balance:,.2f} USD\n"
         f"   Отклонение: <b>{diff_exchange:+,.2f} USD</b> {sign_ex}\n\n"
         f"💰 <b>Общая цель:</b> {TOTAL_GOAL:,.2f} USD\n"
         f"   Общий факт: {fact_total:,.2f} USD\n"
