@@ -182,6 +182,10 @@ def get_gold_price_usd():
     return get_setting('gold_last_price', 0.0)
 
 def get_silver_price_usd():
+    manual_price = get_setting('slavyanka_manual_price', 0.0)
+    if manual_price > 0:
+        return manual_price
+        
     try:
         ticker = yf.Ticker("SI=F")
         hist = ticker.history(period="1d")
@@ -198,8 +202,12 @@ def parse_asset_name(raw_name):
     translations = {'ВТС': 'BTC', 'БИТКОИН': 'BTC', 'ЕТН': 'ETH', 'ЭФИР': 'ETH', 'СОЛ': 'SOL', 'СОЛАНА': 'SOL'}
     if name in translations: name = translations[name]
     
+    # Умная проверка на Славянку (разные варианты написания)
+    if "СЛАВ" in name or "СЛОВ" in name or "СЛАВЯН" in name:
+        return 'СЛАВЯНКА', 'coin', 'physical'
+
     if "ЗОЛОТ" in name or "GOLD" in name: return 'GOLD', 'metal', 'physical'
-    elif "СЛАВЯНКА" in name or "МОНЕТ" in name: return 'СЛАВЯНКА', 'coin', 'physical'
+    elif "МОНЕТ" in name: return 'СЛАВЯНКА', 'coin', 'physical'
     elif len(name) <= 5 and name not in ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'USDT']: return name, 'stock', 'exchange'
     else: return name, 'crypto', 'exchange'
 
@@ -232,11 +240,10 @@ async def cmd_start(message: types.Message):
     
     await message.answer(
         "👋 <b>Добро пожаловать в Orion 2.0!</b>\n\n"
-        "Я твой личный инвест-помощник. Вот что я умею:\n\n"
-        "💼 <b>Считать портфель:</b> складываю крипту, акции и физические активы (золото, монеты).\n"
-        "📈 <b>Следить за рынком:</b> беру актуальные цены с бирж и НБРБ.\n"
-        "🎯 <b>Сравнивать с планом:</b> показываю, идёшь ли ты по графику к цели в 100 000$.\n"
-        "📅 <b>Присылать отчет:</b> каждое 1-е число в 10:00.\n\n"
+        "Я твой личный инвест-помощник.\n\n"
+        "💼 <b>Считать портфель:</b> складываю крипту, акции и физические активы.\n"
+        "📈 <b>Следить за рынком:</b> беру актуальные цены с бирж.\n"
+        "🎯 <b>Сравнивать с планом:</b> показываю, идёшь ли ты по графику к 100 000$.\n\n"
         "👇 <b>Нажми кнопки ниже, чтобы начать!</b>",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
@@ -255,20 +262,30 @@ async def handle_callbacks(callback: CallbackQuery):
             "📝 <b>Как вводить данные:</b>\n\n"
             "1. Установи сумму на бирже: <code>На бирже 2000</code>\n"
             "2. Купи актив: <code>Купил 0,001 ВТС по 78000</code>\n"
-            "3. Купи физику: <code>Купил 4 грамма золота за 700</code>\n\n"
-            "Чтобы посмотреть портфель, нажми кнопку «📊 Мой портфель».",
+            "3. Купи золото: <code>Купил 3 грамма золота за 443</code>\n"
+            "4. Купи Славянку: <code>Купил 3 славянку за 162</code>\n"
+            "5. Установи цену Славянки: <code>Цена славянки 60</code>",
             parse_mode="HTML"
         )
         await callback.answer()
     elif callback.data == "clear_db":
         clear_db()
-        await callback.message.answer("🗑 <b>Все данные очищены.</b> Теперь можно начать заново.", parse_mode="HTML")
+        await callback.message.answer("🗑 <b>Все данные очищены.</b>", parse_mode="HTML")
         await callback.answer()
 
 @dp.message()
 async def handle_text(message: types.Message):
     text = message.text.strip().lower()
     
+    slav_price_match = re.search(r'цена\s+славянки\s+([\d\s.,]+)', text)
+    if slav_price_match:
+        try:
+            price = clean_number(slav_price_match.group(1))
+            set_setting('slavyanka_manual_price', price)
+            await message.answer(f"✅ Цена выкупа Славянки установлена вручную: <b>{int(price)} USD</b>", parse_mode="HTML")
+        except: await message.answer("Не смог распознать цену.")
+        return
+        
     balance_match = re.search(r'(?:баланс\s+биржи|баланс\s+на\s+бирже|на\s+бирже)\s+([\d\s.,]+)', text)
     if balance_match:
         try:
@@ -309,11 +326,6 @@ async def handle_text(message: types.Message):
             
             raw_name = re.sub(r'[\d\s.,]+', '', part1).strip()
             asset_name, asset_type, location = parse_asset_name(raw_name)
-            
-            if "СЛАВЯНКА" in raw_name.upper() or "МОНЕТ" in raw_name.upper():
-                asset_name = 'СЛАВЯНКА'
-                asset_type = 'coin'
-                location = 'physical'
 
             if prep == "за" or location == 'physical':
                 unit_price = val / amount
@@ -439,7 +451,6 @@ async def show_plan_fact(message: types.Message):
     )
     await message.answer(text, parse_mode="HTML")
 
-# --- АВТОМАТИЧЕСКИЙ ОТЧЕТ 1-ГО ЧИСЛА ---
 async def monthly_report():
     if not CHAT_ID:
         return
@@ -461,7 +472,6 @@ async def monthly_report():
     total_capital = total_exchange_balance + physical_value
     now = datetime.now(MINSK_TZ)
     
-    # Берем план на текущий месяц (так как отчет 1-го числа)
     plan_exchange = get_plan_for_month(now.year, now.month)
     
     text = (
@@ -470,7 +480,7 @@ async def monthly_report():
         f"🏦 <b>На бирже:</b> {int(total_exchange_balance):,} USD\n\n"
         f"🎯 <b>План на этот месяц (биржа):</b> {int(plan_exchange):,} USD\n"
         f"🏆 <b>Общая цель:</b> {int(TOTAL_GOAL):,} USD\n\n"
-        f"Не забывай пополнять портфель и следить за балансом! 🚀"
+        f"Не забывай пополнять портфель! 🚀"
     )
     await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
 
@@ -485,9 +495,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', 10000)
     await site.start()
     
-    # Настройка планировщика
     scheduler = AsyncIOScheduler(timezone=MINSK_TZ)
-    # Отчет 1-го числа каждого месяца в 10:00
     scheduler.add_job(monthly_report, 'cron', day=1, hour=10, minute=0)
     scheduler.start()
     
