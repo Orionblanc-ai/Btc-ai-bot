@@ -147,7 +147,8 @@ PLAN_DATA = {
 }
 TOTAL_GOAL = 100000.0
 
-START_DATE = datetime(2026, 11, 1)
+# ИЗМЕНЕНО: Старт с 1 января 2026
+START_DATE = datetime(2026, 1, 1)
 END_DATE = datetime(2030, 12, 31)
 TOTAL_DAYS = (END_DATE - START_DATE).days
 DAILY_GROWTH = TOTAL_GOAL / TOTAL_DAYS
@@ -202,7 +203,6 @@ def parse_asset_name(raw_name):
     translations = {'ВТС': 'BTC', 'БИТКОИН': 'BTC', 'ЕТН': 'ETH', 'ЭФИР': 'ETH', 'СОЛ': 'SOL', 'СОЛАНА': 'SOL'}
     if name in translations: name = translations[name]
     
-    # Умная проверка на Славянку (разные варианты написания)
     if "СЛАВ" in name or "СЛОВ" in name or "СЛАВЯН" in name:
         return 'СЛАВЯНКА', 'coin', 'physical'
 
