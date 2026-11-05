@@ -12,6 +12,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import CallbackQuery
 from datetime import datetime
 import pytz
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = None 
@@ -230,11 +231,13 @@ async def cmd_start(message: types.Message):
     builder.adjust(2, 2)
     
     await message.answer(
-        "🤖 Привет! Я твой портфельный менеджер.\n\n"
-        "Примеры команд:\n"
-        "• <code>На бирже 2000</code>\n"
-        "• <code>Купил 0,001 ВТС по 78 000</code>\n"
-        "• <code>Купил 4 грамма золота за 700</code>",
+        "👋 <b>Добро пожаловать в Orion 2.0!</b>\n\n"
+        "Я твой личный инвест-помощник. Вот что я умею:\n\n"
+        "💼 <b>Считать портфель:</b> складываю крипту, акции и физические активы (золото, монеты).\n"
+        "📈 <b>Следить за рынком:</b> беру актуальные цены с бирж и НБРБ.\n"
+        "🎯 <b>Сравнивать с планом:</b> показываю, идёшь ли ты по графику к цели в 100 000$.\n"
+        "📅 <b>Присылать отчет:</b> каждое 1-е число в 10:00.\n\n"
+        "👇 <b>Нажми кнопки ниже, чтобы начать!</b>",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
     )
@@ -248,11 +251,18 @@ async def handle_callbacks(callback: CallbackQuery):
         await show_plan_fact(callback.message)
         await callback.answer()
     elif callback.data == "help_add":
-        await callback.message.answer("Пиши: «На бирже 2000», «Купил 0,1 ВТС по 75000» или «Купил 4 грамма золота за 700».")
+        await callback.message.answer(
+            "📝 <b>Как вводить данные:</b>\n\n"
+            "1. Установи сумму на бирже: <code>На бирже 2000</code>\n"
+            "2. Купи актив: <code>Купил 0,001 ВТС по 78000</code>\n"
+            "3. Купи физику: <code>Купил 4 грамма золота за 700</code>\n\n"
+            "Чтобы посмотреть портфель, нажми кнопку «📊 Мой портфель».",
+            parse_mode="HTML"
+        )
         await callback.answer()
     elif callback.data == "clear_db":
         clear_db()
-        await callback.message.answer("🗑 Все данные очищены.")
+        await callback.message.answer("🗑 <b>Все данные очищены.</b> Теперь можно начать заново.", parse_mode="HTML")
         await callback.answer()
 
 @dp.message()
@@ -300,6 +310,11 @@ async def handle_text(message: types.Message):
             raw_name = re.sub(r'[\d\s.,]+', '', part1).strip()
             asset_name, asset_type, location = parse_asset_name(raw_name)
             
+            if "СЛАВЯНКА" in raw_name.upper() or "МОНЕТ" in raw_name.upper():
+                asset_name = 'СЛАВЯНКА'
+                asset_type = 'coin'
+                location = 'physical'
+
             if prep == "за" or location == 'physical':
                 unit_price = val / amount
             else:
@@ -360,7 +375,6 @@ async def show_portfolio(message: types.Message):
     
     total_capital = total_exchange_balance + physical_value
     
-    # Убрал прогресс-бар из портфеля, как вы и просили
     final_text = f"📊 <b>Твой портфель:</b>\n\n"
     final_text += f"🏦 На бирже: <b>{int(total_exchange_balance):,} USD</b>\n"
     final_text += f"{text_exchange}\n"
@@ -404,7 +418,6 @@ async def show_plan_fact(message: types.Message):
     
     today_str = now.strftime("%d.%m.%Y")
     
-    # Прогресс-бар добавлен в План-Факт
     progress = fact_total / TOTAL_GOAL
     bar_length = 10
     filled = int(progress * bar_length)
@@ -426,6 +439,41 @@ async def show_plan_fact(message: types.Message):
     )
     await message.answer(text, parse_mode="HTML")
 
+# --- АВТОМАТИЧЕСКИЙ ОТЧЕТ 1-ГО ЧИСЛА ---
+async def monthly_report():
+    if not CHAT_ID:
+        return
+    
+    portfolio = get_portfolio()
+    total_exchange_balance = get_exchange_balance()
+    
+    gold_price = get_gold_price_usd()
+    silver_price = get_silver_price_usd()
+    
+    physical_value = 0
+    for asset, amount, avg_buy_price, asset_type, location in portfolio:
+        if location == 'physical':
+            current_price = None
+            if asset_type == 'metal': current_price = gold_price
+            elif asset_type == 'coin': current_price = silver_price
+            if current_price and current_price > 0: physical_value += amount * current_price
+
+    total_capital = total_exchange_balance + physical_value
+    now = datetime.now(MINSK_TZ)
+    
+    # Берем план на текущий месяц (так как отчет 1-го числа)
+    plan_exchange = get_plan_for_month(now.year, now.month)
+    
+    text = (
+        f"📅 <b>Ежемесячный отчет ({now.strftime('%d.%m.%Y')})</b>\n\n"
+        f"💼 <b>Твой текущий капитал:</b> {int(total_capital):,} USD\n"
+        f"🏦 <b>На бирже:</b> {int(total_exchange_balance):,} USD\n\n"
+        f"🎯 <b>План на этот месяц (биржа):</b> {int(plan_exchange):,} USD\n"
+        f"🏆 <b>Общая цель:</b> {int(TOTAL_GOAL):,} USD\n\n"
+        f"Не забывай пополнять портфель и следить за балансом! 🚀"
+    )
+    await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
+
 async def handle_web(request):
     return web.Response(text="Bot is running!")
 
@@ -436,6 +484,13 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 10000)
     await site.start()
+    
+    # Настройка планировщика
+    scheduler = AsyncIOScheduler(timezone=MINSK_TZ)
+    # Отчет 1-го числа каждого месяца в 10:00
+    scheduler.add_job(monthly_report, 'cron', day=1, hour=10, minute=0)
+    scheduler.start()
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
