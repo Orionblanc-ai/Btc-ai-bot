@@ -141,26 +141,14 @@ def clear_db():
 
 init_db()
 
-# --- ПЛАН ---
+# --- ПЛАН ПО БИРЖЕ (из таблицы) ---
 PLAN_DATA = {
     (2026, 11): 2393.38, (2026, 12): 2642.98, (2027, 1): 2907.56, (2027, 2): 3188.01, (2027, 3): 3485.29, (2027, 4): 3800.41, (2027, 5): 4134.43, (2027, 6): 4488.50, (2027, 7): 4863.81, (2027, 8): 5261.64, (2027, 9): 5683.34, (2027, 10): 6130.34, (2027, 11): 6604.16, (2027, 12): 7106.41, (2028, 1): 7638.79, (2028, 2): 8203.12, (2028, 3): 8801.31, (2028, 4): 9435.39, (2028, 5): 10107.51, (2028, 6): 10819.96, (2028, 7): 11575.16, (2028, 8): 12375.67, (2028, 9): 13224.21, (2028, 10): 14123.66, (2028, 11): 15077.08, (2028, 12): 16087.70, (2029, 1): 17158.97, (2029, 2): 18294.50, (2029, 3): 19498.17, (2029, 4): 20774.06, (2029, 5): 22126.51, (2029, 6): 23560.10, (2029, 7): 25079.70, (2029, 8): 26690.49, (2029, 9): 28397.92, (2029, 10): 30207.79, (2029, 11): 32126.26, (2029, 12): 34159.83, (2030, 1): 36315.42, (2030, 2): 38600.35, (2030, 3): 41022.37, (2030, 4): 43589.71, (2030, 5): 46311.09, (2030, 6): 49195.76, (2030, 7): 52253.51, (2030, 8): 55494.72, (2030, 9): 58930.40, (2030, 10): 62572.22, (2030, 11): 66432.56, (2030, 12): 68528.53
 }
 TOTAL_GOAL = 100000.0
 
-START_DATE = datetime(2026, 1, 1)
-END_DATE = datetime(2030, 12, 31)
-TOTAL_DAYS = (END_DATE - START_DATE).days
-DAILY_GROWTH = TOTAL_GOAL / TOTAL_DAYS
-
 def get_plan_for_month(year, month):
     return PLAN_DATA.get((year, month), 0.0)
-
-def get_expected_total_goal():
-    now = datetime.now(MINSK_TZ).replace(tzinfo=None)
-    if now < START_DATE: return 0.0
-    if now > END_DATE: return TOTAL_GOAL
-    days_passed = (now - START_DATE).days
-    return days_passed * DAILY_GROWTH
 
 # --- ЦЕНЫ ---
 def get_crypto_price(symbol):
@@ -402,8 +390,10 @@ async def show_plan_fact(message: types.Message):
     current_year = now.year
     current_month = now.month
     
+    # 1. План по бирже (из таблицы)
     plan_exchange = get_plan_for_month(current_year, current_month)
     
+    # 2. Факт по физике
     gold_price = get_gold_price_usd()
     silver_price = get_silver_price_usd()
     
@@ -415,13 +405,16 @@ async def show_plan_fact(message: types.Message):
             elif asset_type == 'coin': current_price = silver_price
             if current_price and current_price > 0: physical_value += amount * current_price
 
+    # 3. Расчеты
     fact_total = total_exchange_balance + physical_value
+    
+    # Общий план = План по бирже + Факт по физике (чтобы не ломать голову)
+    plan_total = plan_exchange + physical_value
     
     diff_exchange = total_exchange_balance - plan_exchange
     sign_ex = "🟢" if diff_exchange >= 0 else "🔴"
     
-    plan_total_linear = get_expected_total_goal()
-    diff_total = fact_total - plan_total_linear
+    diff_total = fact_total - plan_total
     sign_total = "🟢" if diff_total >= 0 else "🔴"
     
     remaining_to_goal = TOTAL_GOAL - fact_total
@@ -442,7 +435,7 @@ async def show_plan_fact(message: types.Message):
         f"   PnL: <b>{int(diff_exchange):+} USD</b> {sign_ex}\n\n"
         f"💰 <b>Общий капитал:</b>\n"
         f"   Факт: {int(fact_total):,} USD\n"
-        f"   План: {int(plan_total_linear):,} USD\n"
+        f"   План: {int(plan_total):,} USD\n"
         f"   PnL: <b>{int(diff_total):+} USD</b> {sign_total}\n\n"
         f"🏆 <b>Цель:</b> {int(TOTAL_GOAL):,} USD\n"
         f"   Осталось: <b>{int(remaining_to_goal):,} USD</b>\n"
