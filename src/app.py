@@ -147,7 +147,6 @@ PLAN_DATA = {
 }
 TOTAL_GOAL = 100000.0
 
-# ИЗМЕНЕНО: Старт с 1 января 2026
 START_DATE = datetime(2026, 1, 1)
 END_DATE = datetime(2030, 12, 31)
 TOTAL_DAYS = (END_DATE - START_DATE).days
@@ -262,7 +261,7 @@ async def handle_callbacks(callback: CallbackQuery):
             "📝 <b>Как вводить данные:</b>\n\n"
             "1. Установи сумму на бирже: <code>На бирже 2000</code>\n"
             "2. Купи актив: <code>Купил 0,001 ВТС по 78000</code>\n"
-            "3. Купи золото: <code>Купил 3 грамма золота за 443</code>\n"
+            "3. Купи золото (общая сумма): <code>Купил 3 грамма золота за 443</code>\n"
             "4. Купи Славянку: <code>Купил 3 славянку за 162</code>\n"
             "5. Установи цену Славянки: <code>Цена славянки 60</code>",
             parse_mode="HTML"
@@ -327,7 +326,7 @@ async def handle_text(message: types.Message):
             raw_name = re.sub(r'[\d\s.,]+', '', part1).strip()
             asset_name, asset_type, location = parse_asset_name(raw_name)
 
-            if prep == "за" or location == 'physical':
+            if prep == "за":
                 unit_price = val / amount
             else:
                 unit_price = val
